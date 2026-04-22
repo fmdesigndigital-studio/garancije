@@ -49,7 +49,6 @@
 
         const calculateExpiryDate = (purchaseDate, baseMonths, extendedMonths) => {
             const date = new Date(purchaseDate);
-            // Dodali smo || 0 da spriječimo grešku ako je extendedMonths prazan
             date.setMonth(date.getMonth() + parseInt(baseMonths) + (parseInt(extendedMonths) || 0));
             return date;
         };
@@ -245,77 +244,33 @@
                                                     <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full ${style.bg} ${style.color}`}>{style.label}</span>
                                                 </div>
                                                 <h3 className="font-bold text-slate-800 mb-4 truncate text-lg">{item.name}</h3>
-                                                <div className="flex items-center justify-between text-xs text-slate-500 border-t border-slate-100 pt-4">
-                                                    <span className="flex items-center gap-1.5"><Icon name="calendar" className="w-3.5 h-3.5 text-slate-400" /> Ističe: {formatDate(expiry)}</span>
-                                                    <Icon name="chevron-right" className="w-4 h-4 text-slate-300" />
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-
-                                    {filteredWarranties.length === 0 && (
-                                        <div className="col-span-full text-center py-20 bg-white rounded-2xl border border-dashed border-slate-300">
-                                            <Icon name="box" className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-                                            <h3 className="text-lg font-medium text-slate-800">Nema pronađenih garancija</h3>
-                                            <p className="text-slate-500 text-sm mt-1">Kliknite na dugme "Dodaj garanciju" da započnete.</p>
-                                        </div>
-                                    )}
+                                                <div className="flex items-center justify-between text-xs text-slate-50-xl border border-slate-200">
+                                        <img src={item.receiptImage} className="w-full rounded-lg" alt="Račun" />
+                                    </div>
                                 </div>
-                            </div>
-                        )}
-
-                        {view === 'add' && <AddWarrantyForm onSave={handleAddWarranty} onCancel={() => setView('list')} categories={categories.filter(c => c !== 'Sve')} />}
-                        {view === 'detail' && selectedItem && <WarrantyDetail item={selectedItem} onBack={() => setView('list')} onDelete={() => handleDelete(selectedItem.id)} />}
-                    </main>
-                </div>
-            );
-        }
-
-        function AddWarrantyForm({ onSave, onCancel, categories }) {
-            const [formData, setFormData] = useState({ name: '', category: 'Alati', purchaseDate: new Date().toISOString().split('T')[0], baseMonths: 24, extendedMonths: 0, receiptImage: null, warrantyImage: null });
-            const [isSaving, setIsSaving] = useState(false);
-
-            const handleImage = (e, field) => {
-                const file = e.target.files[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    const img = new Image();
-                    img.src = reader.result;
-                    img.onload = () => {
-                        const canvas = document.createElement('canvas');
-                        const MAX = 1000;
-                        let w = img.width, h = img.height;
-                        if (w > h && w > MAX) { h *= MAX / w; w = MAX; } else if (h > MAX) { w *= MAX / h; h = MAX; }
-                        canvas.width = w; canvas.height = h;
-                        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-                        setFormData(p => ({ ...p, [field]: canvas.toDataURL('image/jpeg', 0.6) }));
-                    };
-                };
-                reader.readAsDataURL(file);
-            };
-
-            return (
-                <div className="max-w-2xl mx-auto bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
-                    <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
-                        <button onClick={onCancel} className="p-1.5 hover:bg-slate-200 rounded-lg transition-colors text-slate-500 hover:text-slate-700"><Icon name="arrow-left" className="w-5 h-5" /></button>
-                        <h2 className="font-bold text-slate-800">Novi unos garancije</h2>
+                            ) : (
+                                <div className="text-sm text-slate-400 bg-slate-50 p-4 rounded-xl border border-dashed border-slate-200 flex items-center gap-3">
+                                    <Icon name="image-off" className="w-5 h-5" /> Fiskalni račun nije priložen.
+                                </div>
+                            )}
+                            {item.warrantyImage && (
+                                <div className="space-y-2">
+                                    <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Garantni list</span>
+                                    <div className="bg-slate-50 p-2 rounded-xl border border-slate-200">
+                                        <img src={item.warrantyImage} className="w-full rounded-lg" alt="Garantni list" />
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     </div>
-                    <form onSubmit={async e => { e.preventDefault(); setIsSaving(true); await onSave(formData); }} className="p-6 space-y-5">
-                        <div>
-                            <label className="block text-sm font-semibold text-slate-700 mb-1.5">Naziv proizvoda ili modela</label>
-                            <input type="text" required placeholder="Npr. Makita Ugaona brusilica..." value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all" />
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                            <div>
-                                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Kategorija</label>
-                                <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm">
-                                    {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Datum kupovine</label>
-                                <input type="date" required value={formData.purchaseDate} onChange={e => setFormData({...formData, purchaseDate: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm" />
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5
+                </div>
+            </div>
+        );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+</script>
+</body>
+</html>
+                                                                                                                                    
