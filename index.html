@@ -1,28 +1,88 @@
 <!DOCTYPE html>
 <html lang="bs">
 <head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Registar Garancija Pro</title>
-    <script src="https://cdn.tailwindcss.com"></script><script src="https://unpkg.com/lucide@latest"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Registar Garancija Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;} ::-webkit-scrollbar{width:6px;} ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px;}</style>
+
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
 </head>
-<body class="bg-slate-50 text-slate-900"><div id="root"></div>
+<body class="bg-slate-50 text-slate-900">
+    <div id="root"></div>
+
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        const app = initializeApp({ apiKey: "AIzaSyDAqkl8MzPRjVg9MVxc2lMsbdvRmGi_P2A", authDomain: "registar-garancija-74a34.firebaseapp.com", projectId: "registar-garancija-74a34", storageBucket: "registar-garancija-74a34.firebasestorage.app", messagingSenderId: "358578315364", appId: "1:358578315364:web:8b462c97f860f1c3a63f71" });
-        window.firebaseDeps = { auth: getAuth(app), db: getFirestore(app), appId: "registar-garancija-74a34", provider: new GoogleAuthProvider(), signInWithPopup, signOut, onAuthStateChanged, collection, onSnapshot, addDoc, deleteDoc, doc };
+
+        const firebaseConfig = {
+          apiKey: "AIzaSyDAqkl8MzPRjVg9MVxc2lMsbdvRmGi_P2A",
+          authDomain: "registar-garancija-74a34.firebaseapp.com",
+          projectId: "registar-garancija-74a34",
+          storageBucket: "registar-garancija-74a34.firebasestorage.app",
+          messagingSenderId: "358578315364",
+          appId: "1:358578315364:web:8b462c97f860f1c3a63f71"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const provider = new GoogleAuthProvider();
+        const appId = "registar-garancija-74a34";
+
+        window.firebaseDeps = { auth, db, appId, provider, signInWithPopup, signOut, onAuthStateChanged, collection, onSnapshot, addDoc, deleteDoc, doc };
     </script>
+
     <script type="text/babel" data-type="module">
         const { useState, useMemo, useEffect, useRef } = React;
-        const calcExp = (pd, bm, em=0) => { const d = new Date(pd); d.setMonth(d.getMonth() + parseInt(bm) + parseInt(em)); return d; };
-        const calcDays = (ed) => { const n = new Date(); n.setHours(0,0,0,0); const e = new Date(ed); e.setHours(0,0,0,0); return Math.ceil((e-n)/(1000*60*60*24)); };
-        const getStyle = (d) => d<0 ? {l:'Istekla', c:'text-red-700', bg:'bg-red-50', i:'x-circle'} : d<=30 ? {l:'Ističe uskoro', c:'text-amber-700', bg:'bg-amber-50', i:'alert-triangle'} : {l:'Važeća', c:'text-emerald-700', bg:'bg-emerald-50', i:'check-circle'};
-        const fmtD = (d) => new Intl.DateTimeFormat('bs-BA', {day:'2-digit', month:'2-digit', year:'numeric'}).format(d);
-        const Icon = ({n, c}) => { const r = useRef(null); useEffect(() => { if(r.current) { r.current.innerHTML = `<i data-lucide="${n}" class="${c||''}"></i>`; lucide.createIcons({root:r.current}); } }, [n, c]); return <span ref={r} style={{display:'contents'}}></span>; };
+
+        const calculateExpiryDate = (purchaseDate, baseMonths, extendedMonths) => {
+            const date = new Date(purchaseDate);
+            // Dodali smo || 0 da spriječimo grešku ako je extendedMonths prazan
+            date.setMonth(date.getMonth() + parseInt(baseMonths) + (parseInt(extendedMonths) || 0));
+            return date;
+        };
+
+        const calculateDaysRemaining = (expiryDate) => {
+            const now = new Date();
+            now.setHours(0, 0, 0, 0); 
+            const exp = new Date(expiryDate);
+            exp.setHours(0, 0, 0, 0);
+            const diffTime = exp - now;
+            return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        };
+
+        const getStatusStyle = (daysRemaining) => {
+            if (daysRemaining < 0) return { label: 'Istekla', color: 'text-red-700', bg: 'bg-red-50', border: 'border-red-200', icon: 'x-circle' };
+            if (daysRemaining <= 30) return { label: 'Ističe uskoro', color: 'text-amber-700', bg: 'bg-amber-50', border: 'border-amber-200', icon: 'alert-triangle' };
+            return { label: 'Važeća', color: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'check-circle' };
+        };
+
+        const formatDate = (date) => {
+            return new Intl.DateTimeFormat('bs-BA', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(date);
+        };
+
+        const Icon = ({ name, className }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current) {
+                    iconRef.current.innerHTML = `<i data-lucide="${name}" class="${className || ''}"></i>`;
+                    lucide.createIcons({ root: iconRef.current });
+                }
+            }, [name, className]);
+            return <span ref={iconRef} style={{ display: 'contents' }}></span>;
+        };
 
         function App() {
             const [warranties, setWarranties] = useState([]);
@@ -32,29 +92,44 @@
             const [selectedItem, setSelectedItem] = useState(null);
             const [searchQuery, setSearchQuery] = useState('');
             const [filterCategory, setFilterCategory] = useState('Sve');
+
             const categories = ['Sve', 'Alati', 'Bela tehnika', 'Mobilni uređaji', 'PC i komponente', 'TV i IT', 'Auto', 'Ostalo'];
 
             useEffect(() => {
                 if (!window.firebaseDeps) return;
-                return window.firebaseDeps.onAuthStateChanged(window.firebaseDeps.auth, u => { setUser(u); setLoading(false); });
+                const { auth, onAuthStateChanged } = window.firebaseDeps;
+                const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+                    setUser(currentUser);
+                    setLoading(false);
+                });
+                return () => unsubscribe();
             }, []);
 
             useEffect(() => {
                 if (!user || !window.firebaseDeps) return;
                 const { db, appId, collection, onSnapshot } = window.firebaseDeps;
-                return onSnapshot(collection(db, 'artifacts', appId, 'users', user.uid, 'warranties'), s => {
-                    setWarranties(s.docs.map(d => ({ id: d.id, ...d.data() })));
+                const warrantiesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'warranties');
+                const unsubscribe = onSnapshot(warrantiesRef, (snapshot) => {
+                    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    setWarranties(data);
                 });
+                return () => unsubscribe();
             }, [user]);
 
-            const authAction = async (isLogin) => {
-                const { auth, provider, signInWithPopup, signOut } = window.firebaseDeps;
-                try { isLogin ? await signInWithPopup(auth, provider) : await signOut(auth); } catch (e) { console.error(e); }
+            const login = async () => {
+                const { auth, provider, signInWithPopup } = window.firebaseDeps;
+                try { await signInWithPopup(auth, provider); } catch (e) { console.error(e); }
             };
 
-            const handleSave = async (data) => {
+            const logout = async () => {
+                const { auth, signOut } = window.firebaseDeps;
+                await signOut(auth);
+            };
+
+            const handleAddWarranty = async (newWarranty) => {
                 const { db, appId, collection, addDoc } = window.firebaseDeps;
-                await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'warranties'), { ...data, createdAt: new Date().toISOString() });
+                const warrantiesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'warranties');
+                await addDoc(warrantiesRef, { ...newWarranty, createdAt: new Date().toISOString() });
                 setView('list');
             };
 
@@ -65,24 +140,44 @@
                 setView('list');
             };
 
-            const filtered = useMemo(() => warranties.filter(i => (filterCategory==='Sve'||i.category===filterCategory) && i.name?.toLowerCase().includes(searchQuery.toLowerCase())).sort((a,b) => calcExp(a.purchaseDate,a.baseMonths,a.extendedMonths) - calcExp(b.purchaseDate,b.baseMonths,b.extendedMonths)), [warranties, searchQuery, filterCategory]);
+            const filteredWarranties = useMemo(() => {
+                return warranties.filter(item => {
+                    const matchesSearch = item.name?.toLowerCase().includes(searchQuery.toLowerCase());
+                    const matchesCategory = filterCategory === 'Sve' || item.category === filterCategory;
+                    return matchesSearch && matchesCategory;
+                }).sort((a, b) => {
+                    return calculateExpiryDate(a.purchaseDate, a.baseMonths, a.extendedMonths) - calculateExpiryDate(b.purchaseDate, b.baseMonths, b.extendedMonths);
+                });
+            }, [warranties, searchQuery, filterCategory]);
 
-            if (loading) return <div className="min-h-screen flex items-center justify-center"><Icon name="loader-2" className="w-8 h-8 animate-spin text-blue-600"/></div>;
-
-            if (!user) return (
-                <div className="min-h-screen flex items-center justify-center p-6 bg-slate-50">
-                    <div className="bg-white p-10 rounded-3xl shadow-sm border border-slate-200 text-center max-w-lg w-full">
-                        <div className="bg-blue-50 w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6"><Icon name="shield-check" className="w-12 h-12 text-blue-600" /></div>
-                        <h1 className="text-3xl font-extrabold text-slate-900 mb-3 tracking-tight">Pametni registar garancija</h1>
-                        <p className="text-slate-500 text-lg leading-relaxed mb-8">Sačuvajte digitalnu kopiju računa i garancije odmah nakon kupovine i spavajte mirno.</p>
-                        <button onClick={()=>authAction(true)} className="w-full flex items-center justify-center gap-3 bg-blue-600 text-white py-4 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-md active:scale-[0.98]"><Icon name="log-in" className="w-5 h-5" /> Prijavi se sa Google-om</button>
-                        <p className="mt-6 text-xs text-slate-400 font-medium uppercase tracking-widest">Sigurno • Privatno • Cloud</p>
+            if (loading) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-slate-50">
+                        <Icon name="loader-2" className="w-8 h-8 animate-spin text-blue-600" />
                     </div>
-                </div>
-            );
+                );
+            }
+
+            if (!user) {
+                return (
+                    <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-slate-50">
+                        <div className="bg-white p-10 rounded-3xl shadow-sm border border-slate-200 text-center max-w-lg w-full">
+                            <div className="bg-blue-50 w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                                <Icon name="shield-check" className="w-12 h-12 text-blue-600" />
+                            </div>
+                            <h1 className="text-3xl font-extrabold text-slate-900 mb-3 tracking-tight">Pametni registar garancija</h1>
+                            <p className="text-slate-500 text-lg leading-relaxed mb-8">Sačuvajte digitalnu kopiju računa i garancije odmah nakon kupovine i spavajte mirno.</p>
+                            <button onClick={login} className="w-full flex items-center justify-center gap-3 bg-blue-600 text-white py-4 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-md active:scale-[0.98]">
+                                <Icon name="log-in" className="w-5 h-5" /> Prijavi se sa Google-om
+                            </button>
+                            <p className="mt-6 text-xs text-slate-400 font-medium uppercase tracking-widest">Sigurno • Privatno • Cloud</p>
+                        </div>
+                    </div>
+                );
+            }
 
             return (
-                <div className="min-h-screen pb-20">
+                <div className="min-h-screen relative pb-20">
                     <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm">
                         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
                             <div className="flex items-center gap-4">
@@ -90,104 +185,137 @@
                                     <div className="bg-blue-600 p-2 rounded-lg"><Icon name="shield-check" className="w-5 h-5 text-white" /></div>
                                     <h1 className="hidden sm:block text-xl font-bold text-slate-800 tracking-tight">Garancije<span className="text-blue-600">Pro</span></h1>
                                 </div>
-                                {view === 'list' && <div className="hidden md:block pl-4 border-l border-slate-200"><span className="text-sm font-medium text-slate-500 uppercase tracking-wider">Arhiva garancija</span></div>}
+                                {view === 'list' && (
+                                    <div className="hidden md:block pl-4 border-l border-slate-200">
+                                        <span className="text-sm font-medium text-slate-500 uppercase tracking-wider">Arhiva garancija</span>
+                                    </div>
+                                )}
                             </div>
                             <div className="flex items-center gap-2 sm:gap-3">
-                                {view === 'list' && <button onClick={() => setView('add')} className="flex items-center gap-1.5 sm:gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl transition-all shadow-sm"><Icon name="plus" className="w-4 h-4" /><span className="uppercase tracking-wide text-[10px] sm:text-xs font-bold mt-0.5 whitespace-nowrap">Dodaj garanciju</span></button>}
-                                <button onClick={()=>authAction(false)} className="flex items-center gap-2 px-3 py-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all text-xs font-bold uppercase tracking-wide"><Icon name="log-out" className="w-4 h-4" /><span className="hidden sm:inline">Odjavi se</span></button>
+                                {view === 'list' && (
+                                    <button onClick={() => setView('add')} className="flex items-center gap-1.5 sm:gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl transition-all shadow-sm">
+                                        <Icon name="plus" className="w-4 h-4" />
+                                        <span className="uppercase tracking-wide text-[10px] sm:text-xs font-bold mt-0.5 whitespace-nowrap">Dodaj garanciju</span>
+                                    </button>
+                                )}
+                                <button 
+                                    onClick={logout} 
+                                    className="flex items-center gap-2 px-3 py-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all text-xs font-bold uppercase tracking-wide border border-transparent hover:border-red-100"
+                                >
+                                    <Icon name="log-out" className="w-4 h-4" />
+                                    <span className="hidden sm:inline">Odjavi se</span>
+                                </button>
                             </div>
                         </div>
                     </header>
+
                     <main className="max-w-5xl mx-auto px-4 py-6">
                         {view === 'list' && (
                             <div className="space-y-6">
                                 <div className="flex gap-3">
-                                    <div className="relative flex-1"><div className="absolute inset-y-0 left-0 pl-3 flex items-center"><Icon name="search" className="h-5 w-5 text-slate-400" /></div><input type="text" placeholder="Pretraži..." value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl shadow-sm outline-none focus:ring-2 focus:ring-blue-500" /></div>
-                                    <select value={filterCategory} onChange={e=>setFilterCategory(e.target.value)} className="px-3 bg-white border border-slate-200 rounded-xl text-sm shadow-sm outline-none focus:ring-2 focus:ring-blue-500">{categories.map(c=><option key={c} value={c}>{c}</option>)}</select>
+                                    <div className="relative flex-1">
+                                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                            <Icon name="search" className="h-5 w-5 text-slate-400" />
+                                        </div>
+                                        <input 
+                                            type="text" 
+                                            placeholder="Pretraži alate i uređaje..." 
+                                            value={searchQuery} 
+                                            onChange={e => setSearchQuery(e.target.value)} 
+                                            className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl shadow-sm outline-none focus:ring-2 focus:ring-blue-500 transition-all" 
+                                        />
+                                    </div>
+                                    <select 
+                                        value={filterCategory} 
+                                        onChange={e => setFilterCategory(e.target.value)} 
+                                        className="px-3 bg-white border border-slate-200 rounded-xl text-sm shadow-sm outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                                    >
+                                        {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                                    </select>
                                 </div>
+
                                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                                    {filtered.map(item => {
-                                        const exp = calcExp(item.purchaseDate, item.baseMonths, item.extendedMonths);
-                                        const st = getStyle(calcDays(exp));
+                                    {filteredWarranties.map(item => {
+                                        const expiry = calculateExpiryDate(item.purchaseDate, item.baseMonths, item.extendedMonths);
+                                        const style = getStatusStyle(calculateDaysRemaining(expiry));
                                         return (
-                                            <div key={item.id} onClick={()=>{setSelectedItem(item);setView('detail');}} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm cursor-pointer hover:shadow-md">
-                                                <div className="flex justify-between items-start mb-2"><span className="text-[10px] font-bold text-slate-400 uppercase">{item.category}</span><span className={`text-[10px] font-bold uppercase px-2.5 py-1 rounded-full ${st.bg} ${st.c}`}>{st.l}</span></div>
+                                            <div key={item.id} onClick={() => { setSelectedItem(item); setView('detail'); }} className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-all cursor-pointer">
+                                                <div className="flex justify-between items-start mb-2">
+                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{item.category}</span>
+                                                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full ${style.bg} ${style.color}`}>{style.label}</span>
+                                                </div>
                                                 <h3 className="font-bold text-slate-800 mb-4 truncate text-lg">{item.name}</h3>
-                                                <div className="flex justify-between text-xs text-slate-500 border-t border-slate-100 pt-4"><span className="flex items-center gap-1.5"><Icon name="calendar" className="w-3.5 h-3.5 text-slate-400"/> Ističe: {fmtD(exp)}</span><Icon name="chevron-right" className="w-4 h-4 text-slate-300"/></div>
+                                                <div className="flex items-center justify-between text-xs text-slate-500 border-t border-slate-100 pt-4">
+                                                    <span className="flex items-center gap-1.5"><Icon name="calendar" className="w-3.5 h-3.5 text-slate-400" /> Ističe: {formatDate(expiry)}</span>
+                                                    <Icon name="chevron-right" className="w-4 h-4 text-slate-300" />
+                                                </div>
                                             </div>
                                         );
                                     })}
-                                    {filtered.length===0 && <div className="col-span-full text-center py-20 bg-white rounded-2xl border border-dashed border-slate-300"><Icon name="box" className="w-12 h-12 text-slate-300 mx-auto mb-3" /><h3 className="text-lg font-medium">Nema garancija</h3></div>}
+
+                                    {filteredWarranties.length === 0 && (
+                                        <div className="col-span-full text-center py-20 bg-white rounded-2xl border border-dashed border-slate-300">
+                                            <Icon name="box" className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+                                            <h3 className="text-lg font-medium text-slate-800">Nema pronađenih garancija</h3>
+                                            <p className="text-slate-500 text-sm mt-1">Kliknite na dugme "Dodaj garanciju" da započnete.</p>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
-                        {view === 'add' && <AddForm onSave={handleSave} onCancel={()=>setView('list')} cats={categories.filter(c=>c!=='Sve')} />}
-                        {view === 'detail' && selectedItem && <Detail item={selectedItem} onBack={()=>setView('list')} onDelete={()=>handleDelete(selectedItem.id)} />}
+
+                        {view === 'add' && <AddWarrantyForm onSave={handleAddWarranty} onCancel={() => setView('list')} categories={categories.filter(c => c !== 'Sve')} />}
+                        {view === 'detail' && selectedItem && <WarrantyDetail item={selectedItem} onBack={() => setView('list')} onDelete={() => handleDelete(selectedItem.id)} />}
                     </main>
                 </div>
             );
         }
 
-        function AddForm({ onSave, onCancel, cats }) {
-            const [fd, setFd] = useState({ name:'', category:'Alati', purchaseDate:new Date().toISOString().split('T')[0], baseMonths:24, extendedMonths:0, receiptImage:null, warrantyImage:null });
-            const [sv, setSv] = useState(false);
-            const handleImg = (e, f) => {
+        function AddWarrantyForm({ onSave, onCancel, categories }) {
+            const [formData, setFormData] = useState({ name: '', category: 'Alati', purchaseDate: new Date().toISOString().split('T')[0], baseMonths: 24, extendedMonths: 0, receiptImage: null, warrantyImage: null });
+            const [isSaving, setIsSaving] = useState(false);
+
+            const handleImage = (e, field) => {
                 const file = e.target.files[0];
-                if(!file) return;
-                const r = new FileReader();
-                r.onloadend = () => { const i = new Image(); i.src = r.result; i.onload = () => {
-                    const c = document.createElement('canvas'); let w=i.width, h=i.height; const M=1000;
-                    if(w>h && w>M){h*=M/w; w=M;} else if(h>M){w*=M/h; h=M;}
-                    c.width=w; c.height=h; c.getContext('2d').drawImage(i,0,0,w,h);
-                    setFd(p => ({...p, [f]: c.toDataURL('image/jpeg',0.6)}));
-                };};
-                r.readAsDataURL(file);
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const img = new Image();
+                    img.src = reader.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX = 1000;
+                        let w = img.width, h = img.height;
+                        if (w > h && w > MAX) { h *= MAX / w; w = MAX; } else if (h > MAX) { w *= MAX / h; h = MAX; }
+                        canvas.width = w; canvas.height = h;
+                        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                        setFormData(p => ({ ...p, [field]: canvas.toDataURL('image/jpeg', 0.6) }));
+                    };
+                };
+                reader.readAsDataURL(file);
             };
-            return (
-                <div className="max-w-2xl mx-auto bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                    <div className="p-4 bg-slate-50 border-b flex gap-3"><button onClick={onCancel} className="p-1.5"><Icon name="arrow-left" className="w-5 h-5 text-slate-500"/></button><h2 className="font-bold pt-1">Novi unos</h2></div>
-                    <form onSubmit={async e=>{e.preventDefault(); setSv(true); await onSave(fd);}} className="p-6 space-y-5">
-                        <input type="text" required placeholder="Naziv proizvoda..." value={fd.name} onChange={e=>setFd({...fd, name:e.target.value})} className="w-full p-3 bg-slate-50 border rounded-xl" />
-                        <div className="grid sm:grid-cols-2 gap-5">
-                            <select value={fd.category} onChange={e=>setFd({...fd, category:e.target.value})} className="p-3 bg-slate-50 border rounded-xl">{cats.map(c=><option key={c} value={c}>{c}</option>)}</select>
-                            <input type="date" required value={fd.purchaseDate} onChange={e=>setFd({...fd, purchaseDate:e.target.value})} className="p-3 bg-slate-50 border rounded-xl" />
-                        </div>
-                        <div className="grid sm:grid-cols-2 gap-5">
-                            <select value={fd.baseMonths} onChange={e=>setFd({...fd, baseMonths:e.target.value})} className="p-3 bg-slate-50 border rounded-xl"><option value={12}>12 mjeseci</option><option value={24}>24 mjeseca</option><option value={36}>36 mjeseci</option><option value={60}>60 mjeseci</option></select>
-                            <select value={fd.extendedMonths} onChange={e=>setFd({...fd, extendedMonths:e.target.value})} className="p-3 bg-slate-50 border rounded-xl"><option value={0}>Nema produžetka</option><option value={12}>+ 12 mjeseci</option><option value={24}>+ 24 mjeseca</option></select>
-                        </div>
-                        <div className="grid grid-cols-2 gap-4 pt-4 border-t">
-                            <label className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer ${fd.receiptImage?'bg-emerald-50 border-emerald-200':'hover:bg-slate-50 border-slate-300'}`}><input type="file" accept="image/*" onChange={e=>handleImg(e,'receiptImage')} className="hidden"/><Icon name={fd.receiptImage?"check-circle":"camera"} className={`w-6 h-6 mx-auto mb-2 ${fd.receiptImage?'text-emerald-500':'text-slate-400'}`}/><span className="text-[11px] font-bold uppercase">{fd.receiptImage?'Račun dodat':'Slikaj račun'}</span></label>
-                            <label className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer ${fd.warrantyImage?'bg-emerald-50 border-emerald-200':'hover:bg-slate-50 border-slate-300'}`}><input type="file" accept="image/*" onChange={e=>handleImg(e,'warrantyImage')} className="hidden"/><Icon name={fd.warrantyImage?"check-circle":"file-text"} className={`w-6 h-6 mx-auto mb-2 ${fd.warrantyImage?'text-emerald-500':'text-slate-400'}`}/><span className="text-[11px] font-bold uppercase">{fd.warrantyImage?'List dodat':'Garantni list'}</span></label>
-                        </div>
-                        <button type="submit" disabled={sv} className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold flex justify-center gap-2 disabled:opacity-50">{sv?<Icon name="loader-2" className="w-5 h-5 animate-spin"/>:<Icon name="save" className="w-5 h-5"/>}{sv?'Spremanje...':'SAČUVAJ GARANCIJU'}</button>
-                    </form>
-                </div>
-            );
-        }
 
-        function Detail({ item, onBack, onDelete }) {
-            const exp = calcExp(item.purchaseDate, item.baseMonths, item.extendedMonths);
             return (
-                <div className="max-w-2xl mx-auto space-y-5">
-                    <button onClick={onBack} className="text-sm font-bold text-slate-500 flex gap-2"><Icon name="arrow-left" className="w-4 h-4"/> NAZAD</button>
-                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8">
-                        <div className="flex justify-between items-start mb-6"><div><span className="text-[11px] font-bold text-blue-600 uppercase mb-2 block">{item.category}</span><h2 className="text-2xl sm:text-3xl font-bold text-slate-900">{item.name}</h2></div><button onClick={onDelete} className="text-red-500 p-2.5 bg-red-50 rounded-xl"><Icon name="trash-2" className="w-5 h-5"/></button></div>
-                        <div className="grid grid-cols-2 gap-4 mb-8">
-                            <div className="bg-slate-50 border p-4 rounded-xl"><span className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Kupljeno</span><span className="font-bold">{fmtD(new Date(item.purchaseDate))}</span></div>
-                            <div className="bg-slate-50 border p-4 rounded-xl"><span className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Ističe</span><span className="font-bold text-blue-600 flex gap-1.5"><Icon name="calendar" className="w-4 h-4"/> {fmtD(exp)}</span></div>
-                        </div>
-                        <div className="space-y-6">
-                            {item.receiptImage ? <div><span className="text-xs font-bold text-slate-400 uppercase">Račun</span><img src={item.receiptImage} className="w-full rounded-xl border mt-2"/></div> : <div className="text-sm text-slate-400 p-4 border border-dashed rounded-xl flex gap-3"><Icon name="image-off" className="w-5 h-5"/> Račun nije priložen.</div>}
-                            {item.warrantyImage && <div><span className="text-xs font-bold text-slate-400 uppercase">Garantni list</span><img src={item.warrantyImage} className="w-full rounded-xl border mt-2"/></div>}
-                        </div>
+                <div className="max-w-2xl mx-auto bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                    <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+                        <button onClick={onCancel} className="p-1.5 hover:bg-slate-200 rounded-lg transition-colors text-slate-500 hover:text-slate-700"><Icon name="arrow-left" className="w-5 h-5" /></button>
+                        <h2 className="font-bold text-slate-800">Novi unos garancije</h2>
                     </div>
-                </div>
-            );
-        }
-
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
-    </script>
-</body>
-</html>
+                    <form onSubmit={async e => { e.preventDefault(); setIsSaving(true); await onSave(formData); }} className="p-6 space-y-5">
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-700 mb-1.5">Naziv proizvoda ili modela</label>
+                            <input type="text" required placeholder="Npr. Makita Ugaona brusilica..." value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all" />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Kategorija</label>
+                                <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm">
+                                    {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Datum kupovine</label>
+                                <input type="date" required value={formData.purchaseDate} onChange={e => setFormData({...formData, purchaseDate: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm" />
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5
