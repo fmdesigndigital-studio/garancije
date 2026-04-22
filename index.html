@@ -220,4 +220,386 @@
                         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
                             <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('list')}>
                                 <div className="bg-blue-600 p-2 rounded-lg"><Icon name="shield-check" className="w-5 h-5 text-white" /></div>
-                                <h1 className="text-xl font-bold text-slate-8
+                                <h1 className="text-xl font-bold text-slate-800">Garancije<span className="text-blue-600">Pro</span></h1>
+                            </div>
+                            
+                            <div className="flex items-center gap-3">
+                                <div className="hidden sm:flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full border border-emerald-100">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
+                                    Live Sync
+                                </div>
+
+                                {view === 'list' && (
+                                    <button onClick={() => setView('add')} className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg font-medium transition-colors text-sm">
+                                        <Icon name="plus" className="w-4 h-4" />
+                                        <span className="hidden sm:inline">Dodaj</span>
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </header>
+
+                    <main className="max-w-5xl mx-auto px-4 py-6">
+                        {error && (
+                            <div className="mb-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-start gap-3">
+                                <Icon name="alert-circle" className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                                <p className="text-sm font-medium">{error}</p>
+                            </div>
+                        )}
+
+                        {view === 'list' && (
+                            <div className="space-y-6">
+                                <div className="flex flex-col md:flex-row gap-3">
+                                    <div className="relative flex-1">
+                                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                            <Icon name="search" className="h-5 w-5 text-slate-400" />
+                                        </div>
+                                        <input 
+                                            type="text" 
+                                            placeholder="Pretraži alate, uređaje..." 
+                                            value={searchQuery}
+                                            onChange={(e) => setSearchQuery(e.target.value)}
+                                            className="block w-full pl-10 pr-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 sm:text-sm shadow-sm"
+                                        />
+                                    </div>
+                                    <div className="flex gap-2 w-full md:w-auto">
+                                        <select 
+                                            value={filterCategory}
+                                            onChange={(e) => setFilterCategory(e.target.value)}
+                                            className="py-2.5 px-3 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 shadow-sm flex-1 md:flex-none"
+                                        >
+                                            {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                                        </select>
+                                        <button 
+                                            onClick={() => setShowCleanupModal(true)}
+                                            className="flex items-center justify-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 px-4 py-2.5 rounded-xl text-sm font-medium transition-colors shadow-sm"
+                                        >
+                                            <Icon name="settings-2" className="w-4 h-4" />
+                                            <span className="hidden sm:inline">Očisti</span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm text-center">
+                                        <span className="text-slate-500 text-xs font-medium uppercase tracking-wider block mb-1">Ukupno</span>
+                                        <span className="text-2xl font-bold text-slate-800">{warranties.length}</span>
+                                    </div>
+                                    <div className="bg-amber-50 p-4 rounded-xl border border-amber-100 shadow-sm text-center">
+                                        <span className="text-amber-700 text-xs font-medium uppercase tracking-wider block mb-1">Ističe skoro</span>
+                                        <span className="text-2xl font-bold text-amber-700">
+                                            {warranties.filter(w => {
+                                                const days = calculateDaysRemaining(calculateExpiryDate(w.purchaseDate, w.baseMonths, w.extendedMonths));
+                                                return days >= 0 && days <= 30;
+                                            }).length}
+                                        </span>
+                                    </div>
+                                    <div className="bg-red-50 p-4 rounded-xl border border-red-100 shadow-sm text-center">
+                                        <span className="text-red-700 text-xs font-medium uppercase tracking-wider block mb-1">Istekle</span>
+                                        <span className="text-2xl font-bold text-red-700">
+                                            {warranties.filter(w => calculateDaysRemaining(calculateExpiryDate(w.purchaseDate, w.baseMonths, w.extendedMonths)) < 0).length}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                {filteredWarranties.length === 0 && !error ? (
+                                    <div className="text-center py-16 bg-white rounded-2xl border border-dashed border-slate-300">
+                                        <Icon name="database" className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+                                        <h3 className="text-lg font-medium text-slate-900">Baza je prazna</h3>
+                                        <p className="text-sm text-slate-500 mt-1">Dodajte svoju prvu garanciju da biste započeli.</p>
+                                    </div>
+                                ) : (
+                                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                                        {filteredWarranties.map((item) => {
+                                            const expiryDate = calculateExpiryDate(item.purchaseDate, item.baseMonths, item.extendedMonths);
+                                            const daysRemaining = calculateDaysRemaining(expiryDate);
+                                            const style = getStatusStyle(daysRemaining);
+
+                                            return (
+                                                <div 
+                                                    key={item.id} 
+                                                    onClick={() => { setSelectedItem(item); setView('detail'); }}
+                                                    className={`bg-white p-5 rounded-2xl border ${style.border} shadow-sm hover:shadow-md cursor-pointer transition-all flex flex-col h-full`}
+                                                >
+                                                    <div className="flex justify-between items-start mb-3">
+                                                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-slate-100 px-2 py-1 rounded-md">{item.category}</span>
+                                                        <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${style.bg} ${style.color}`}>
+                                                            <Icon name={style.icon} className="w-3 h-3" />
+                                                            {style.label}
+                                                        </div>
+                                                    </div>
+                                                    <h3 className="text-base font-bold text-slate-800 leading-tight mb-4 flex-grow">{item.name}</h3>
+                                                    <div className="flex items-center justify-between text-sm pt-4 border-t border-slate-100 mt-auto">
+                                                        <div className="flex flex-col">
+                                                            <span className="text-slate-400 text-[10px] uppercase font-bold">Ističe</span>
+                                                            <span className="font-semibold text-slate-700 flex items-center gap-1 text-xs">
+                                                                <Icon name="calendar" className="w-3 h-3" />
+                                                                {formatDate(expiryDate)}
+                                                            </span>
+                                                        </div>
+                                                        {daysRemaining > 0 && daysRemaining <= 30 && <span className="text-amber-600 font-bold text-xs bg-amber-50 px-2 py-1 rounded-md">Još {daysRemaining} d.</span>}
+                                                        {daysRemaining < 0 && <span className="text-red-600 font-bold text-xs bg-red-50 px-2 py-1 rounded-md">Pre {Math.abs(daysRemaining)} d.</span>}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {view === 'add' && (
+                            <AddWarrantyForm 
+                                onSave={handleAddWarranty} 
+                                onCancel={() => setView('list')} 
+                                categories={categories.filter(c => c !== 'Sve')} 
+                            />
+                        )}
+
+                        {view === 'detail' && selectedItem && (
+                            <WarrantyDetail 
+                                item={selectedItem} 
+                                onBack={() => setView('list')}
+                                onDelete={() => handleDelete(selectedItem.id)}
+                            />
+                        )}
+                    </main>
+
+                    {showCleanupModal && (
+                        <CleanupModal 
+                            warranties={warranties} 
+                            onClose={() => setShowCleanupModal(false)}
+                            onConfirm={handleBulkCleanup}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        function CleanupModal({ warranties, onClose, onConfirm }) {
+            const [retentionDays, setRetentionDays] = useState(30);
+
+            const expiredWarranties = useMemo(() => {
+                return warranties.map(item => {
+                    const expiryDate = calculateExpiryDate(item.purchaseDate, item.baseMonths, item.extendedMonths);
+                    return { ...item, daysRemaining: calculateDaysRemaining(expiryDate) };
+                }).filter(item => item.daysRemaining < 0).sort((a, b) => a.daysRemaining - b.daysRemaining);
+            }, [warranties]);
+
+            const itemsToDelete = expiredWarranties.filter(item => Math.abs(item.daysRemaining) > retentionDays);
+
+            return (
+                <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+                        <div className="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-red-100 p-2 rounded-lg"><Icon name="trash-2" className="w-5 h-5 text-red-600" /></div>
+                                <h2 className="text-lg font-bold text-slate-800">Čišćenje Baze</h2>
+                            </div>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><Icon name="x" className="w-5 h-5" /></button>
+                        </div>
+                        <div className="p-6 overflow-y-auto flex-1">
+                            <p className="text-slate-600 text-sm mb-6">Podesite period čuvanja nakon isteka. Starije garancije će biti obrisane iz baze.</p>
+                            
+                            <div className="mb-6 bg-slate-50 p-5 rounded-xl border border-slate-200">
+                                <div className="flex justify-between items-end mb-4">
+                                    <label className="font-semibold text-slate-700 text-sm">Čuvaj nakon isteka:</label>
+                                    <span className="text-xl font-bold text-blue-600">{retentionDays} dana</span>
+                                </div>
+                                <input type="range" min="0" max="180" step="5" value={retentionDays} onChange={(e) => setRetentionDays(parseInt(e.target.value))} className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600" />
+                                <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400 mt-2">
+                                    <span>Briši odmah (0)</span><span>180 dana</span>
+                                </div>
+                            </div>
+
+                            <h3 className="font-bold text-slate-800 text-sm mb-3">Istekle garancije ({expiredWarranties.length})</h3>
+                            {expiredWarranties.length === 0 ? (
+                                <div className="text-center py-6 text-slate-500 text-sm bg-slate-50 rounded-xl border border-dashed border-slate-200">Arhiva je čista.</div>
+                            ) : (
+                                <div className="space-y-2">
+                                    {expiredWarranties.map(item => {
+                                        const isDeleted = Math.abs(item.daysRemaining) > retentionDays;
+                                        return (
+                                            <div key={item.id} className={`p-3 rounded-lg border text-sm flex justify-between items-center ${isDeleted ? 'bg-red-50 border-red-100 opacity-70' : 'bg-white border-slate-200'}`}>
+                                                <div className="flex items-center gap-2 truncate pr-4">
+                                                    <Icon name={isDeleted ? "trash" : "clock"} className={`w-4 h-4 flex-shrink-0 ${isDeleted ? 'text-red-400' : 'text-slate-400'}`} />
+                                                    <span className={`truncate ${isDeleted ? 'line-through text-slate-400' : 'text-slate-700 font-medium'}`}>{item.name}</span>
+                                                </div>
+                                                <span className={`text-xs font-bold whitespace-nowrap ${isDeleted ? 'text-red-500' : 'text-slate-500'}`}>Pre {Math.abs(item.daysRemaining)} d.</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                        <div className="p-5 border-t border-slate-200 bg-slate-50 flex justify-between items-center">
+                            <div className="text-sm">Za brisanje: <span className="text-red-600 font-bold">{itemsToDelete.length}</span></div>
+                            <div className="flex gap-2">
+                                <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-200">Odustani</button>
+                                <button onClick={() => onConfirm(itemsToDelete.map(i => i.id))} disabled={itemsToDelete.length === 0} className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 text-white disabled:opacity-50">Obriši</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function WarrantyDetail({ item, onBack, onDelete }) {
+            const expiryDate = calculateExpiryDate(item.purchaseDate, item.baseMonths, item.extendedMonths);
+            const daysRemaining = calculateDaysRemaining(expiryDate);
+            const style = getStatusStyle(daysRemaining);
+
+            return (
+                <div className="max-w-3xl mx-auto space-y-6">
+                    <button onClick={onBack} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 font-medium">
+                        <Icon name="arrow-left" className="w-4 h-4" /> Nazad
+                    </button>
+                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                        <div className={`px-6 py-4 flex items-center gap-3 border-b ${style.border} ${style.bg}`}>
+                            <Icon name={style.icon} className={`w-6 h-6 ${style.color}`} />
+                            <div>
+                                <h3 className={`font-bold ${style.color}`}>{style.label}</h3>
+                                {daysRemaining > 0 && <p className={`text-sm ${style.color}`}>Preostalo: {daysRemaining} dana</p>}
+                                {daysRemaining < 0 && <p className={`text-sm ${style.color}`}>Istekla pre {Math.abs(daysRemaining)} dana</p>}
+                            </div>
+                        </div>
+                        <div className="p-6">
+                            <div className="flex justify-between items-start gap-4 mb-6">
+                                <div>
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-blue-600 block mb-1">{item.category}</span>
+                                    <h1 className="text-2xl font-bold text-slate-900">{item.name}</h1>
+                                </div>
+                                <button onClick={onDelete} className="flex items-center gap-2 text-red-600 bg-red-50 px-3 py-1.5 rounded-lg text-sm font-medium"><Icon name="trash-2" className="w-4 h-4" /> Obriši</button>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-slate-50 rounded-xl p-5 mb-8 border border-slate-100">
+                                <div><span className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Kupovina</span><span className="font-semibold text-sm">{formatDate(new Date(item.purchaseDate))}</span></div>
+                                <div><span className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Istek</span><span className="font-semibold text-sm">{formatDate(expiryDate)}</span></div>
+                                <div><span className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Osnova</span><span className="font-semibold text-sm">{item.baseMonths} mj.</span></div>
+                                <div><span className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Produženo</span><span className="font-semibold text-sm">{item.extendedMonths > 0 ? `+${item.extendedMonths} mj.` : 'Nema'}</span></div>
+                            </div>
+                            <h3 className="font-bold text-slate-800 mb-4">Dokumentacija</h3>
+                            <div className="grid md:grid-cols-2 gap-4">
+                                <div className="border border-slate-200 rounded-xl p-4 text-center">
+                                    <span className="font-medium text-sm mb-3 block">Fiskalni račun</span>
+                                    {item.receiptImage ? <img src={item.receiptImage} className="max-h-48 mx-auto rounded-lg shadow-sm" alt="Račun"/> : <div className="text-slate-400 text-xs py-8"><Icon name="image" className="w-6 h-6 mx-auto mb-2 opacity-50"/>Nije priloženo</div>}
+                                </div>
+                                <div className="border border-slate-200 rounded-xl p-4 text-center">
+                                    <span className="font-medium text-sm mb-3 block">Garantni list</span>
+                                    {item.warrantyImage ? <img src={item.warrantyImage} className="max-h-48 mx-auto rounded-lg shadow-sm" alt="Garancija"/> : <div className="text-slate-400 text-xs py-8"><Icon name="image" className="w-6 h-6 mx-auto mb-2 opacity-50"/>Nije priloženo</div>}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function AddWarrantyForm({ onSave, onCancel, categories }) {
+            const [formData, setFormData] = useState({ name: '', category: 'Alati', purchaseDate: new Date().toISOString().split('T')[0], baseMonths: 24, extendedMonths: 0, receiptImage: null, warrantyImage: null });
+            const [isSaving, setIsSaving] = useState(false);
+
+            const handleImage = (e, field) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        const img = new Image();
+                        img.src = reader.result;
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            const MAX_DIMENSION = 1000;
+                            let width = img.width;
+                            let height = img.height;
+                            
+                            if (width > height && width > MAX_DIMENSION) {
+                                height *= MAX_DIMENSION / width;
+                                width = MAX_DIMENSION;
+                            } else if (height > MAX_DIMENSION) {
+                                width *= MAX_DIMENSION / height;
+                                height = MAX_DIMENSION;
+                            }
+                            
+                            canvas.width = width;
+                            canvas.height = height;
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, width, height);
+                            const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.6);
+                            setFormData(p => ({ ...p, [field]: compressedDataUrl }));
+                        };
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if(!formData.name) return;
+                setIsSaving(true);
+                await onSave(formData);
+                setIsSaving(false);
+            };
+
+            return (
+                <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-sm border border-slate-200">
+                    <div className="px-6 py-4 border-b flex items-center gap-3 bg-slate-50 rounded-t-2xl">
+                        <button type="button" onClick={onCancel} disabled={isSaving} className="p-1 hover:bg-slate-200 rounded-md disabled:opacity-50"><Icon name="arrow-left" className="w-5 h-5" /></button>
+                        <h2 className="text-lg font-bold">Nova Garancija</h2>
+                    </div>
+                    <form onSubmit={handleSubmit} className="p-6 space-y-5">
+                        <div>
+                            <label className="block text-sm font-semibold mb-1">Naziv proizvoda *</label>
+                            <input type="text" required value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-2.5 bg-slate-50 border rounded-lg text-sm" placeholder="Npr. Makita HR2470" />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-semibold mb-1">Kategorija</label>
+                                <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} className="w-full p-2.5 bg-slate-50 border rounded-lg text-sm">
+                                    {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold mb-1">Datum kupovine *</label>
+                                <input type="date" required value={formData.purchaseDate} onChange={e => setFormData({...formData, purchaseDate: e.target.value})} className="w-full p-2.5 bg-slate-50 border rounded-lg text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold mb-1">Osnovna garancija</label>
+                                <select value={formData.baseMonths} onChange={e => setFormData({...formData, baseMonths: e.target.value})} className="w-full p-2.5 bg-slate-50 border rounded-lg text-sm">
+                                    <option value={12}>12 mjeseci</option><option value={24}>24 mjeseca</option><option value={36}>36 mjeseci</option><option value={60}>60 mjeseci</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold mb-1">Produžena (+ mj.)</label>
+                                <select value={formData.extendedMonths} onChange={e => setFormData({...formData, extendedMonths: e.target.value})} className="w-full p-2.5 bg-slate-50 border rounded-lg text-sm">
+                                    <option value={0}>Nema</option><option value={12}>+ 12 mjeseci</option><option value={24}>+ 24 mjeseca</option><option value={36}>+ 36 mjeseci</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4 pt-4 border-t">
+                            <div className={`border-2 border-dashed rounded-lg p-4 text-center relative transition-colors ${formData.receiptImage ? 'bg-emerald-50 border-emerald-200' : 'hover:bg-slate-50 border-slate-300'}`}>
+                                <input type="file" accept="image/*" onChange={e => handleImage(e, 'receiptImage')} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                                {formData.receiptImage ? <span className="text-xs text-emerald-600 font-bold flex flex-col items-center"><Icon name="check-circle" className="w-4 h-4 mb-1"/> Račun dodat</span> : <span className="text-xs font-medium text-slate-600"><Icon name="camera" className="w-4 h-4 mx-auto mb-1 text-slate-400"/> Slikaj Račun</span>}
+                            </div>
+                            <div className={`border-2 border-dashed rounded-lg p-4 text-center relative transition-colors ${formData.warrantyImage ? 'bg-emerald-50 border-emerald-200' : 'hover:bg-slate-50 border-slate-300'}`}>
+                                <input type="file" accept="image/*" onChange={e => handleImage(e, 'warrantyImage')} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                                {formData.warrantyImage ? <span className="text-xs text-emerald-600 font-bold flex flex-col items-center"><Icon name="check-circle" className="w-4 h-4 mb-1"/> List dodat</span> : <span className="text-xs font-medium text-slate-600"><Icon name="file-text" className="w-4 h-4 mx-auto mb-1 text-slate-400"/> Slikaj Garanciju</span>}
+                            </div>
+                        </div>
+                        <p className="text-[10px] text-slate-400 text-center">Slike se automatski kompresuju radi bržeg spremanja na Cloud.</p>
+                        
+                        <div className="flex justify-end gap-2 pt-4">
+                            <button type="button" onClick={onCancel} disabled={isSaving} className="px-4 py-2 text-sm font-medium bg-slate-100 rounded-lg disabled:opacity-50">Odustani</button>
+                            <button type="submit" disabled={isSaving} className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg flex items-center gap-2 disabled:opacity-50">
+                                {isSaving ? <Icon name="loader-2" className="w-4 h-4 animate-spin" /> : <Icon name="cloud-upload" className="w-4 h-4" />}
+                                {isSaving ? 'Spremanje...' : 'Sačuvaj'}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
