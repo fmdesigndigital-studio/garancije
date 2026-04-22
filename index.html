@@ -280,4 +280,113 @@
                         <button onClick={onCancel} className="p-1.5 hover:bg-slate-200 rounded-lg transition-colors text-slate-500 hover:text-slate-700"><Icon name="arrow-left" className="w-5 h-5" /></button>
                         <h2 className="font-bold text-slate-800">Novi unos garancije</h2>
                     </div>
-                    <form onSubmit={async e => { e.preventDefault(); setIsSaving(true); await onSave(formData); }} className="p-6 space-y-
+                    <form onSubmit={async e => { e.preventDefault(); setIsSaving(true); await onSave(formData); }} className="p-6 space-y-5">
+                        <div>
+                            <label className="block text-sm font-semibold text-slate-700 mb-1.5">Naziv proizvoda ili modela</label>
+                            <input type="text" required placeholder="Npr. Makita Ugaona brusilica..." value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all" />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Kategorija</label>
+                                <select value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm">
+                                    {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Datum kupovine</label>
+                                <input type="date" required value={formData.purchaseDate} onChange={e => setFormData({...formData, purchaseDate: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm" />
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Osnovni rok garancije</label>
+                                <select value={formData.baseMonths} onChange={e => setFormData({...formData, baseMonths: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm">
+                                    <option value={12}>12 mjeseci</option><option value={24}>24 mjeseca</option><option value={36}>36 mjeseci</option><option value={60}>60 mjeseci</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1.5">Dodatni produžetak</label>
+                                <select value={formData.extendedMonths} onChange={e => setFormData({...formData, extendedMonths: e.target.value})} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm">
+                                    <option value={0}>Nema produžetka</option><option value={12}>+ 12 mjeseci (Npr. online registracija)</option><option value={24}>+ 24 mjeseca</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4 pt-4 border-t border-slate-100">
+                            <label className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all ${formData.receiptImage ? 'bg-emerald-50 border-emerald-200' : 'hover:bg-slate-50 border-slate-300'}`}>
+                                <input type="file" accept="image/*" onChange={e => handleImage(e, 'receiptImage')} className="hidden" />
+                                <Icon name={formData.receiptImage ? "check-circle" : "camera"} className={`w-6 h-6 mx-auto mb-2 ${formData.receiptImage ? 'text-emerald-500' : 'text-slate-400'}`} />
+                                <span className={`text-[11px] font-bold uppercase tracking-wide block ${formData.receiptImage ? 'text-emerald-700' : 'text-slate-500'}`}>{formData.receiptImage ? 'Račun je dodat' : 'Slikaj račun'}</span>
+                            </label>
+                            <label className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all ${formData.warrantyImage ? 'bg-emerald-50 border-emerald-200' : 'hover:bg-slate-50 border-slate-300'}`}>
+                                <input type="file" accept="image/*" onChange={e => handleImage(e, 'warrantyImage')} className="hidden" />
+                                <Icon name={formData.warrantyImage ? "check-circle" : "file-text"} className={`w-6 h-6 mx-auto mb-2 ${formData.warrantyImage ? 'text-emerald-500' : 'text-slate-400'}`} />
+                                <span className={`text-[11px] font-bold uppercase tracking-wide block ${formData.warrantyImage ? 'text-emerald-700' : 'text-slate-500'}`}>{formData.warrantyImage ? 'List je dodat' : 'Garantni list'}</span>
+                            </label>
+                        </div>
+                        <button type="submit" disabled={isSaving} className="w-full mt-4 bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-sm">
+                            {isSaving ? <Icon name="loader-2" className="w-5 h-5 animate-spin" /> : <Icon name="save" className="w-5 h-5" />}
+                            {isSaving ? 'Spremanje podataka...' : 'SAČUVAJ GARANCIJU'}
+                        </button>
+                    </form>
+                </div>
+            );
+        }
+
+        function WarrantyDetail({ item, onBack, onDelete }) {
+            const expiry = calculateExpiryDate(item.purchaseDate, item.baseMonths, item.extendedMonths);
+            return (
+                <div className="max-w-2xl mx-auto space-y-5">
+                    <button onClick={onBack} className="text-sm font-bold text-slate-500 hover:text-slate-800 flex items-center gap-2 transition-colors"><Icon name="arrow-left" className="w-4 h-4" /> NAZAD NA LISTU</button>
+                    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+                        <div className="p-6 md:p-8">
+                            <div className="flex justify-between items-start mb-6">
+                                <div>
+                                    <span className="text-[11px] font-bold text-blue-600 uppercase tracking-wider mb-2 block">{item.category}</span>
+                                    <h2 className="text-2xl sm:text-3xl font-bold text-slate-900 leading-tight">{item.name}</h2>
+                                </div>
+                                <button onClick={() => onDelete(item.id)} className="text-red-500 p-2.5 bg-red-50 hover:bg-red-100 rounded-xl transition-colors" title="Obriši"><Icon name="trash-2" className="w-5 h-5" /></button>
+                            </div>
+                            <div className="grid grid-cols-2 gap-4 mb-8">
+                                <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl">
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Datum kupovine</span>
+                                    <span className="font-bold text-slate-800">{formatDate(new Date(item.purchaseDate))}</span>
+                                </div>
+                                <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl">
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Ističe</span>
+                                    <span className="font-bold text-blue-600 flex items-center gap-1.5"><Icon name="calendar" className="w-4 h-4" /> {formatDate(expiry)}</span>
+                                </div>
+                            </div>
+                            <h3 className="font-bold text-slate-800 mb-4 border-b border-slate-100 pb-2">Dokumentacija</h3>
+                            <div className="space-y-6">
+                                {item.receiptImage ? (
+                                    <div className="space-y-2">
+                                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Fiskalni račun</span>
+                                        <div className="bg-slate-50 p-2 rounded-xl border border-slate-200">
+                                            <img src={item.receiptImage} className="w-full rounded-lg" alt="Račun" />
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="text-sm text-slate-400 bg-slate-50 p-4 rounded-xl border border-dashed border-slate-200 flex items-center gap-3">
+                                        <Icon name="image-off" className="w-5 h-5" /> Fiskalni račun nije priložen.
+                                    </div>
+                                )}
+                                {item.warrantyImage && (
+                                    <div className="space-y-2">
+                                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Garantni list</span>
+                                        <div className="bg-slate-50 p-2 rounded-xl border border-slate-200">
+                                            <img src={item.warrantyImage} className="w-full rounded-lg" alt="Garantni list" />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
