@@ -110,7 +110,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
   return d.runTransaction(d.db,async tx=>{
    const snapshot=await tx.get(ref),current=snapshot.exists()?snapshot.data():null;
    if(current?.lastOperation===operationId)return;
-   if(window.garancijeFingerprint(current)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je ocuvan.');
+   if(window.garancijeFingerprint(current)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je očuvan.');
    const safe=Object.fromEntries(['name','category','purchaseDate','baseMonths','extendedMonths','store','description'].map(k=>[k,metadata[k]]).filter(([,v])=>v!==undefined));
    tx.set(ref,{...safe,attachments,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
   });
@@ -167,7 +167,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         };
         const folderInfo = async id => {
             const file = await json(await request(API + '/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType,parents,trashed,ownedByMe,permissions(type,role,emailAddress),appProperties'));
-            if (file.trashed || file.mimeType !== 'application/vnd.google-apps.folder' || !file.ownedByMe || !file.permissions?.length || file.permissions.some(p => p.type !== 'user' || p.role !== 'owner' || p.emailAddress?.toLowerCase() !== EMAIL)) throw new Error('Privatnost ili vlasnistvo foldera nisu potvrdeni. Nema daljeg kreiranja.');
+            if (file.trashed || file.mimeType !== 'application/vnd.google-apps.folder' || !file.ownedByMe || !file.permissions?.length || file.permissions.some(p => p.type !== 'user' || p.role !== 'owner' || p.emailAddress?.toLowerCase() !== EMAIL)) throw new Error('Privatnost ili vlasništvo foldera nisu potvrđeni. Nema daljeg kreiranja.');
             return file;
         };
         const getFile = async id => { const response = await request(API + '/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType,size,parents,appProperties,trashed'); return response.status === 404 ? null : json(response); };
@@ -249,7 +249,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 assertUser(userId); let draft;
                 mutateJournal(j => {
                     if (operationId && (j.discardedDrafts?.[operationId] || (j.draft && j.draft.operationId !== operationId))) throw new Error('Ovaj nacrt više nije aktivan. Nema automatskog obnavljanja.');
-                    if(j.draft && (j.draft.id !== id) && !(id == null && !j.draft.edit)) throw new Error('Prvo nastavite sacuvani nacrt.');
+                    if(j.draft && (j.draft.id !== id) && !(id == null && !j.draft.edit)) throw new Error('Prvo nastavite sačuvani nacrt.');
                     if(j.draft?.sealed) { draft=j.draft; return; }
                     const previous=j.draft;
                     draft={id:previous?.id || id || 'gp-'+crypto.randomUUID(), edit:previous?.edit ?? !!id, operationId:previous?.operationId || operationId || 'op-'+crypto.randomUUID(), expected:previous?.expected ?? canonical(base ?? null), metadata, attachments, pending:pending.map(({id,name,kind,mime,size,sha256})=>({id,name,kind,mime,size,sha256})), sealed:false};
@@ -258,7 +258,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             },
             async checkFolders() {
                 const values=await Promise.all(Object.values(DRIVE_FOLDERS).map(folderInfo));
-                if(values.some((f,i)=>f.id!==Object.values(DRIVE_FOLDERS)[i] || f.name!==['baza-garancije-i-racuni','proizvodi','rezervne-kopije'][i]) || values.slice(1).some(f=>!f.parents?.includes(DRIVE_FOLDERS.root))) throw new Error('Postojeca hijerarhija se ne poklapa. Nema upisa.');
+                if(values.some((f,i)=>f.id!==Object.values(DRIVE_FOLDERS)[i] || f.name!==['baza-garancije-i-racuni','proizvodi','rezervne-kopije'][i]) || values.slice(1).some(f=>!f.parents?.includes(DRIVE_FOLDERS.root))) throw new Error('Postojeća hijerarhija se ne poklapa. Nema upisa.');
                 return DRIVE_FOLDERS;
             },
             async load({ userId, id, driveFileId, sha256: expectedHash }) {
@@ -271,13 +271,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             },
             async saveWarranty({ userId, newAttachments=[] }) {
                 api.assertWriteAllowed(userId);
-                if(!options.metadataStore?.read || !options.metadataStore?.commit) throw new Error('Cuvanje nije aktivirano. Nacrt je ocuvan.');
+                if(!options.metadataStore?.read || !options.metadataStore?.commit) throw new Error('Čuvanje nije aktivirano. Nacrt je očuvan.');
                 return lock(async()=>{
-                    let d=journal().draft; if(!d) throw new Error('Nema sacuvanog nacrta.');
+                    let d=journal().draft; if(!d) throw new Error('Nema sačuvanog nacrta.');
                     mutateJournal(j=>{j.draft.sealed=true;}); d=journal().draft;
                     const current=await options.metadataStore.read(d.id,userId);
                     if(current?.lastOperation===d.operationId) { mutateJournal(j=>{j.draft=null;}); return current.attachments || []; }
-                    if(canonical(current)!==d.expected) throw new Error('Zapis je u medjuvremenu promenjen. Nacrt je ocuvan; potrebno je uskladjivanje bez prepisivanja.');
+                    if(canonical(current)!==d.expected) throw new Error('Zapis je u međuvremenu promenjen. Nacrt je očuvan; potrebno je usklađivanje bez prepisivanja.');
                     const refs=[...d.attachments];
                     if(d.pending.length) { needToken(); await api.checkFolders(); }
                     for(const a of d.pending) {
@@ -292,7 +292,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                             fileId=await ensureFile(key,{name:a.name,mimeType:a.mime,parents:[DRIVE_FOLDERS.products]},picked.original);
                         }
                         const detail=await json(await request(API+'/files/'+encodeURIComponent(fileId)+'?fields=id,ownedByMe,shared,permissions(type,role,emailAddress)'));
-                        if(!detail.ownedByMe || detail.shared!==false || !detail.permissions?.length || detail.permissions.some(p=>p.role!=='owner'||p.type!=='user'||p.emailAddress?.toLowerCase()!==EMAIL)) throw new Error('Privatnost priloga nije potvrdjena.');
+                        if(!detail.ownedByMe || detail.shared!==false || !detail.permissions?.length || detail.permissions.some(p=>p.role!=='owner'||p.type!=='user'||p.emailAddress?.toLowerCase()!==EMAIL)) throw new Error('Privatnost priloga nije potvrđena.');
                         refs.push({...a,driveFileId:fileId,storage:'google-drive'});
                     }
                     // commit must atomically compare the complete original snapshot and merge only edited fields.
@@ -442,7 +442,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             return <section className="attachment-list space-y-3" aria-label="Prilozi">
                 {attachments.length === 0 && <p className="text-slate-500">Nema priloga.</p>}
                 {attachments.map(a => <div key={a.id} className="border rounded-xl p-3 space-y-2 min-w-0">
-                    <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>Ponovo izaberite original za nastavak ili proverite vec poslati fajl preko Sacuvaj.</p>}
+                    <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>Ponovo izaberite original za nastavak ili proverite već poslati fajl preko Sačuvaj.</p>}
                     {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
                     {a.dataUrl && !a.legacy && <img src={a.dataUrl} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
                     <button type="button" aria-label={"Prikaži prilog: " + a.name} disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="attachment-open-button text-blue-700 border rounded-xl px-3 py-2">Prikaži prilog</button>
@@ -729,7 +729,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                             const index=result.findIndex(p=>!p.original && p.sha256===a.sha256 && p.size===a.size);
                             if(index>=0) result[index]={...a,id:result[index].id,kind:result[index].kind};
                             else if(!sealed) result.push(a);
-                            else setImageError('Izabrani fajl ne odgovara originalima sacuvanog nacrta.');
+                            else setImageError('Izabrani fajl ne odgovara originalima sačuvanog nacrta.');
                         } return result;
                     });
                     const failed = results.filter(r => r.status === 'rejected').length;
@@ -797,8 +797,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             return (
                 <form onSubmit={submit} aria-busy={saving || processing || discarding} className="bg-white p-6 rounded-2xl border shadow-sm space-y-4 max-w-xl mx-auto">
                     <h2 className="text-xl font-bold mb-4">{initial ? 'Izmena garancije' : 'Nova garancija'}</h2>
-                    <p className="text-sm mb-3">Nacrt se cuva na ovom uredjaju. Odustani zatvara formu i zadrzava nacrt.</p>
-                    {sealed && <p role="status">Nastavak zapocetog cuvanja: podaci su zakljucani dok se ishod ne potvrdi. Nedostajuce originale izaberite ponovo.</p>}
+                    <p className="text-sm mb-3">Nacrt se čuva na ovom uređaju. Odustani zatvara formu i zadržava nacrt.</p>
+                    {sealed && <p role="status">Nastavak započetog čuvanja: podaci su zaključani dok se ishod ne potvrdi. Nedostajuće originale izaberite ponovo.</p>}
                     {error && <p role="alert" className="text-red-700">{error}</p>}
                     <fieldset disabled={saving || discarding} className="space-y-4">
                         <label className="block">Naziv proizvoda
@@ -819,7 +819,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         </div>
                         <p role="status" className="bg-slate-50 p-3 rounded-xl">Ističe: {fmtDate(expiry)}</p>
                         {(service?.mode === 'simulated-drive' || !service?.writesEnabled) && <div className="bg-slate-50 p-3 rounded-xl text-sm">
-                            {service?.mode === 'simulated-drive' ? 'SIMULACIJA: podaci i slike ostaju u lokalnom demo skladistu i posle osvezavanja. Nema stvarnog Drive-a.' : 'Lokalna priprema: produkcioni upis nije aktiviran.'}
+                            {service?.mode === 'simulated-drive' ? 'SIMULACIJA: podaci i slike ostaju u lokalnom demo skladištu i posle osvežavanja. Nema stvarnog Drive-a.' : 'Lokalna priprema: produkcioni upis nije aktiviran.'}
                         </div>}
                         <div className="p-4 border-2 border-dashed rounded-xl space-y-3">
                             <p id="attachment-picker-help" className="text-sm text-slate-600">Slikaj račun kamerom ili dodaj slike iz galerije. Prethodni prilozi ostaju sačuvani.</p>
