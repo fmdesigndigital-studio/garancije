@@ -371,7 +371,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         <button type="button" className="border rounded-xl px-3 py-2" onClick={download}>Preuzmi</button>
                         <button type="button" className="border rounded-xl px-3 py-2" onClick={() => { setPrintPreview(v => !v); setZoom(false); }}>{printPreview ? 'Nazad na pregled' : 'Prikaz za štampu'}</button>
                     </div>
-                    {printPreview && <div className="no-print mb-4"><p>Prikaz za štampu — jedan prilog. Štampa se ne pokreće automatski.</p><button type="button" className="border rounded-xl px-3 py-2" onClick={() => window.print()}>Otvori dijalog štampe</button></div>}
+                    {printPreview && <div className="no-print mb-4"><p>Izaberi štampač ili sačuvaj ovaj prilog kao PDF.</p><button type="button" className="border rounded-xl px-3 py-2" onClick={() => window.print()}>Štampaj / Sačuvaj kao PDF</button></div>}
                     <div className={printPreview ? 'print-sheet bg-white p-4 border' : 'overflow-auto'}>
                         {printPreview && <p className="font-bold mb-3 break-all">{attachment.kind}: {attachment.name}</p>}
                         <img style={zoom ? { width: "200%" } : undefined} src={src} alt={attachment.name} onError={() => { setSrc(null); setError('Slika ne može da se prikaže.'); }} className={zoom ? 'max-w-none' : 'max-w-full max-h-[65vh] mx-auto object-contain'} />
