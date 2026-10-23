@@ -539,6 +539,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const [attachments, setAttachments] = useState(() => restored.current?.attachments || attachmentRefs(initial));
             const [pending, setPending] = useState(() => restored.current?.pending || []);
             const pendingUrls = useRef(new Set());
+            const cameraInput = useRef(null), galleryInput = useRef(null);
 
             const legacy = legacyAttachments(initial);
             const needsService = pending.length > 0 || attachments.length > 0;
@@ -562,7 +563,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const expiry = calcExp(form.purchaseDate, form.baseMonths, form.extendedMonths);
 
             const handleFile = async e => {
-                if (savingRef.current) return;
+                if (savingRef.current || processingRef.current) return;
                 const files = Array.from(e.target.files); e.target.value = '';
                 if (!files.length) return;
                 processingRef.current++; setProcessing(true); setImageError('');
@@ -643,10 +644,15 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         {(service?.mode === 'simulated-drive' || !service?.writesEnabled) && <div className="bg-slate-50 p-3 rounded-xl text-sm">
                             {service?.mode === 'simulated-drive' ? 'SIMULACIJA: podaci i slike ostaju u lokalnom demo skladistu i posle osvezavanja. Nema stvarnog Drive-a.' : 'Lokalna priprema: produkcioni upis nije aktiviran.'}
                         </div>}
-                        <label className="block p-4 border-2 border-dashed rounded-xl">
-                            Dodaj originalne slike (možete izabrati više)
-                            <input type="file" multiple accept="image/*" onChange={handleFile} className="block w-full text-sm mt-2" />
-                        </label>
+                        <div className="p-4 border-2 border-dashed rounded-xl space-y-3">
+                            <p id="attachment-picker-help" className="text-sm text-slate-600">Slikaj račun kamerom ili dodaj slike iz galerije. Prethodni prilozi ostaju sačuvani.</p>
+                            <input ref={cameraInput} type="file" accept="image/*" capture="environment" aria-label="Slika računa iz kamere" disabled={saving || processing} onChange={handleFile} className="hidden" />
+                            <input ref={galleryInput} type="file" accept="image/*" multiple aria-label="Slike iz galerije" disabled={saving || processing} onChange={handleFile} className="hidden" />
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <button type="button" disabled={saving || processing} aria-describedby="attachment-picker-help" onClick={() => cameraInput.current?.click()} className="min-h-[48px] w-full px-4 py-3 rounded-xl bg-blue-600 text-white font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">Slikaj račun</button>
+                                <button type="button" disabled={saving || processing} aria-describedby="attachment-picker-help" onClick={() => galleryInput.current?.click()} className="min-h-[48px] w-full px-4 py-3 rounded-xl border border-blue-600 text-blue-700 font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">Dodaj iz galerije</button>
+                            </div>
+                        </div>
                         {processing && <p role="status">Obrada fotografija...</p>}
                         <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} />
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
