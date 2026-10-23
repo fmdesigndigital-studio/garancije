@@ -415,6 +415,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         }
 
 
+        const draftConflictMessage = 'Postoji drugi nezavršen nacrt. Vratite se na listu i izaberite „Nastavi nacrt / novi unos“ da ga nastavite. Izmena izabrane garancije nije otvorena; nacrt je sačuvan.';
+        const draftMatchesRecord = (draft, record) => !draft || (record ? draft.edit === true && draft.id === record.id : draft.edit === false);
+
         function App() {
             const [warranties, setWarranties] = useState([]);
             const [user, setUser] = useState(null);
@@ -466,6 +469,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
             const openForm = (record=null) => {
                 try { const d=window.attachmentService.getDraft(user.uid);
+                    if (record && !draftMatchesRecord(d, record)) throw new Error(draftConflictMessage);
+                    setAuthError('');
                     if(d) { setSelected(d.edit ? (warranties.find(w=>w.id===d.id)||{id:d.id}) : null); setView(d.edit?'edit':'add'); }
                     else {setSelected(record);setView(record?'edit':'add');}
                 } catch(e) {setAuthError(e.message);}
@@ -547,7 +552,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
         function AddForm({ onCancel, onSave, onBusy, user, initial = null }) {
             const service = window.attachmentService;
-            const restored = useRef(service.getDraft(user.uid));
+            const savedDraft = service.getDraft(user.uid);
+            const draftConflict = !draftMatchesRecord(savedDraft, initial);
+            const restored = useRef(draftConflict ? null : savedDraft);
             const [sealed, setSealed] = useState(!!restored.current?.sealed);
             const [form, setForm] = useState(() => restored.current?.metadata || ({
                 name: textValue(initial?.name), category: textValue(initial?.category) || 'Alati',
@@ -576,7 +583,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             }, []);
             useEffect(() => { onBusy(saving); return () => onBusy(false); }, [saving, onBusy]);
             useEffect(() => {
-                try { const {id, ...base} = initial || {}; service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:form,attachments,pending}); }
+                try {
+                    if (!draftMatchesRecord(service.getDraft(user.uid), initial)) throw new Error(draftConflictMessage);
+                    const {id, ...base} = initial || {}; service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:form,attachments,pending});
+                }
                 catch(e) { setError(e.message); }
             }, [form,attachments,pending]);
             const change = (field, value) => { if(!sealed) setForm(previous => ({ ...previous, [field]: value })); };
@@ -615,6 +625,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
             const submit = async e => {
                 e.preventDefault();
+                if (draftConflict) { setError(draftConflictMessage); return; }
                 if (savingRef.current || processingRef.current) return;
                 if (!form.name.trim() || !expiry || form.purchaseDate > dateInput() || form.description.length > 150) {
                     setError('Unesite naziv, ispravan datum kupovine koji nije u budućnosti, celo trajanje u mesecima i opis do 150 karaktera.');
@@ -624,6 +635,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 if (needsService && !service?.saveWarranty) { setError('Servis priloga nije konfigurisan. Nema čuvanja niti slanja priloga. Unos ostaje u formi.'); return; }
                 savingRef.current = true; setSaving(true); setError('');
                 try {
+                    if (!draftMatchesRecord(service.getDraft(user.uid), initial)) throw new Error(draftConflictMessage);
                     const {id, ...base} = initial || {};
                     const data = { ...form, name: form.name.trim(), store: form.store.trim(), baseMonths: Number(form.baseMonths), extendedMonths: Number(form.extendedMonths) };
                     service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:data,attachments,pending});
@@ -637,6 +649,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if (mounted.current) setSaving(false);
                 }
             };
+
+            if (draftConflict) return <div role="alert" className="bg-white p-6 rounded-2xl border max-w-xl mx-auto"><p>{draftConflictMessage}</p><button type="button" onClick={onCancel} className="mt-4 border rounded-xl px-3 py-2">Nazad</button></div>;
 
             return (
                 <form onSubmit={submit} aria-busy={saving || processing} className="bg-white p-6 rounded-2xl border shadow-sm space-y-4 max-w-xl mx-auto">
