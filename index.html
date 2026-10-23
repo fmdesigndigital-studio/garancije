@@ -23,6 +23,8 @@
         .warranty-card-category { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
         .warranty-card-status { flex-shrink: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
         .warranty-card-title { white-space: normal; overflow-wrap: anywhere; }
+        .attachment-list { min-width: 0; overflow-wrap: anywhere; }
+        .attachment-open-button { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
         @media (max-width: 639px) {
             .warranty-card-meta { flex-direction: column; }
         }
@@ -400,13 +402,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
         function AttachmentList({ attachments, user, onKindChange }) {
             const [opened, setOpened] = useState(null);
-            return <section className="space-y-3" aria-label="Prilozi">
+            return <section className="attachment-list space-y-3" aria-label="Prilozi">
                 {attachments.length === 0 && <p className="text-slate-500">Nema priloga.</p>}
                 {attachments.map(a => <div key={a.id} className="border rounded-xl p-3 space-y-2 min-w-0">
                     <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>Ponovo izaberite original za nastavak ili proverite vec poslati fajl preko Sacuvaj.</p>}
                     {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
                     {a.dataUrl && !a.legacy && <img src={a.dataUrl} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
-                    <button type="button" disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="text-blue-700 border rounded-xl px-3 py-2">Prikaži {a.name}</button>
+                    <button type="button" aria-label={"Prikaži prilog: " + a.name} disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="attachment-open-button text-blue-700 border rounded-xl px-3 py-2">Prikaži prilog</button>
                 </div>)}
                 {opened && <AttachmentViewer attachment={opened} user={user} onClose={() => setOpened(null)} />}
             </section>;
