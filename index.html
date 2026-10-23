@@ -13,6 +13,18 @@
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        dialog::backdrop { background: rgba(15,23,42,.65); }
+        @media print {
+            body { background: white !important; margin: 0 !important; }
+            body * { visibility: hidden; }
+            #root { height: 0 !important; overflow: visible !important; }
+            dialog::backdrop { background: transparent !important; }
+            .attachment-dialog, .attachment-dialog * { visibility: visible; }
+            .attachment-dialog { position: fixed !important; inset: 0 !important; width: 100% !important; max-width: none !important; max-height: none !important; height: 100% !important; margin: 0 !important; padding: 0 !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; overflow: visible !important; background: white !important; }
+            .attachment-dialog .no-print, .attachment-dialog .no-print * { display: none !important; }
+            .attachment-dialog img { max-width: 100% !important; max-height: 90vh !important; object-fit: contain; }
+            .print-sheet { border: 0; }
+        }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-900">
@@ -21,7 +33,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, runTransaction, getDocFromServer } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         const firebaseConfig = {
           apiKey: "AIzaSyDAqkl8MzPRjVg9MVxc2lMsbdvRmGi_P2A",
@@ -36,29 +48,251 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
         const provider = new GoogleAuthProvider();
-        window.firebaseDeps = { auth, db, appId: "registar-garancija-74a34", provider, signInWithPopup, signOut, onAuthStateChanged, collection, onSnapshot, addDoc, deleteDoc, doc };
+        window.firebaseDeps = { auth, db, appId: "registar-garancija-74a34", provider, signInWithPopup, signOut, onAuthStateChanged, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, runTransaction, getDocFromServer };
     </script>
 
+    <script async defer src="https://accounts.google.com/gsi/client"></script>
+    <script>
+// INTEGRATION METADATA ADAPTER
+window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'production',metadataStore:{
+ async read(id,uid) {
+  const d=window.firebaseDeps; if(d.auth.currentUser?.uid!==uid) throw Error('Nalog se promenio.');
+  const ref=d.doc(d.db,'artifacts',d.appId,'users',uid,'warranties',id);
+  const snapshot=await d.getDocFromServer(ref); return snapshot.exists()?snapshot.data():null;
+ },
+ async commit({id,userId,operationId,expected,metadata,attachments}) {
+  const d=window.firebaseDeps; if(d.auth.currentUser?.uid!==userId) throw Error('Nalog se promenio.');
+  const ref=d.doc(d.db,'artifacts',d.appId,'users',userId,'warranties',id);
+  return d.runTransaction(d.db,async tx=>{
+   const snapshot=await tx.get(ref),current=snapshot.exists()?snapshot.data():null;
+   if(current?.lastOperation===operationId)return;
+   if(window.garancijeFingerprint(current)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je ocuvan.');
+   const safe=Object.fromEntries(['name','category','purchaseDate','baseMonths','extendedMonths','store','description'].map(k=>[k,metadata[k]]).filter(([,v])=>v!==undefined));
+   tx.set(ref,{...safe,attachments,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
+  });
+ }
+}};
+// Drive preparation. No request occurs until an explicit user action.
+(() => {
+    const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+    const EMAIL = 'fmdesigndigital@gmail.com';
+    const CLIENT = '358578315364-feopdj4nvl6qi2uocatph4i55etfj3ef.apps.googleusercontent.com';
+    const API = 'https://www.googleapis.com/drive/v3';
+    const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
+    const DRIVE_FOLDERS = { root: '1FpGp5Plv8whmpgLIq3dlUXVPqI-PhMn6', products: '1EfFbqmgTLUBOb3A-r-u1a3qfsz-5Ra51', backups: '1d2FiWd_FcP1HYUuFGSSIgv7uwup5VPxp' };
+    const sha256 = async blob => [...new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))].map(x => x.toString(16).padStart(2, '0')).join('');
+    const hashText = value => sha256(new Blob([value]));
+    const googleAuthorize = () => new Promise((resolve, reject) => {
+        const oauth = window.google?.accounts?.oauth2;
+        if (!oauth) { reject(new Error('Google povezivanje nije učitano. Proverite mrežu pa pokušajte ponovo.')); return; }
+        const client = oauth.initTokenClient({ client_id: CLIENT, scope: SCOPE, include_granted_scopes: false,
+            login_hint: EMAIL, callback: response => response.error ? reject(new Error('Povezivanje nije odobreno. Unos je očuvan.')) : resolve(response),
+            error_callback: () => reject(new Error('Povezivanje je otkazano ili prozor nije otvoren. Unos je očuvan.')) });
+        client.requestAccessToken({ prompt: 'select_account' });
+    });
+    const canonical = value => JSON.stringify(value, function(k,v) { if(v && typeof v === 'object' && !Array.isArray(v)) return Object.fromEntries(Object.keys(v).sort().map(key=>[key,v[key]])); return v; });
+    window.garancijeFingerprint = canonical;
+    function createDriveService(options = {}) {
+        const send = options.fetch || window.fetch.bind(window), authorize = options.authorize || googleAuthorize;
+        const storage = options.storage || window.localStorage, now = options.now || Date.now;
+        const namespace = 'garancije-drive-integration-v1:' + (options.namespace || 'real') + ':' + EMAIL;
+        const getUser = options.getUser || (() => window.firebaseDeps?.auth?.currentUser);
+        let token = null, deadline = 0, account = null, state = 'disconnected', message = '', generation = 0, timer, connecting = false;
+        const listeners = new Set();
+        const notify = () => { for (const fn of listeners) fn(); };
+        const disconnect = (reason = '') => { generation++; clearTimeout(timer); token = null; deadline = 0; account = null; state = reason ? 'expired' : 'disconnected'; message = reason; notify(); };
+        const needToken = () => { if (!token || now() >= deadline) { disconnect('Drive sesija je istekla. Ponovo povežite Drive; nacrt je očuvan.'); throw new Error(message); } };
+        const assertUser = uid => { const user = getUser(); if (!user || user.uid !== uid || user.email?.toLowerCase() !== EMAIL) throw new Error('Prijavljeni nalog nije dozvoljeni nalog za ovaj Drive.'); };
+        const request = async (url, init = {}, checkingAccount = false) => {
+            if (getUser()?.email?.toLowerCase() !== EMAIL) { disconnect(); throw new Error('Prijavljeni nalog je promenjen. Ponovo povežite Drive.'); }
+            needToken();
+            const target = new URL(url);
+            if (target.origin !== 'https://www.googleapis.com' || !/^\/(drive\/v3\/|upload\/drive\/v3\/files)/.test(target.pathname)) throw new Error('Nedozvoljena Drive adresa.');
+            if (!checkingAccount && account !== EMAIL) throw new Error('Drive nalog nije potvrđen.');
+            const response = await send(url, { ...init, headers: { ...init.headers, Authorization: 'Bearer ' + token } });
+            if (response.status === 401) { disconnect('Drive pristup je istekao ili opozvan. Ponovo povežite Drive; nacrt je očuvan.'); throw new Error(message); }
+            return response;
+        };
+        const json = async response => { if (!response.ok) throw new Error('Drive zahtev nije uspeo (' + response.status + '). Pokušajte ponovo bez novog slanja iste datoteke.'); return response.json(); };
+        const journal = () => { const raw = storage.getItem(namespace); if (!raw) return { jobs: {}, activeDraft: null }; try { const parsed = JSON.parse(raw); if (!parsed.jobs || typeof parsed.jobs !== 'object') throw new Error(); return parsed; } catch { throw new Error('Lokalni dnevnik oporavka nije čitljiv. Upis je blokiran da se ne naprave duplikati.'); } };
+        const persist = value => storage.setItem(namespace, JSON.stringify(value)); // IDs, hashes and operation status only. Never tokens or image bytes.
+        const mutateJournal = fn => { const value = journal(); fn(value); persist(value); return value; };
+        const lock = fn => {
+            if (navigator.locks) return navigator.locks.request(namespace, fn);
+            throw new Error('Pregledač ne podržava bezbedno zaključavanje upisa. Drive upis je blokiran.');
+        };
+        const folderInfo = async id => {
+            const file = await json(await request(API + '/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType,parents,trashed,ownedByMe,permissions(type,role,emailAddress),appProperties'));
+            if (file.trashed || file.mimeType !== 'application/vnd.google-apps.folder' || !file.ownedByMe || !file.permissions?.length || file.permissions.some(p => p.type !== 'user' || p.role !== 'owner' || p.emailAddress?.toLowerCase() !== EMAIL)) throw new Error('Privatnost ili vlasnistvo foldera nisu potvrdeni. Nema daljeg kreiranja.');
+            return file;
+        };
+        const getFile = async id => { const response = await request(API + '/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType,size,parents,appProperties,trashed'); return response.status === 404 ? null : json(response); };
+        const reserve = async key => {
+            const saved = journal().jobs[key]; if (saved) return saved;
+            const result = await json(await request(API + '/files/generateIds?count=1&space=drive&type=files'));
+            if (!result.ids?.[0]) throw new Error('Drive ID nije dobijen.');
+            const job = { id: result.ids[0], state: 'reserved' };
+            mutateJournal(j => { j.jobs[key] = job; }); // Durable BEFORE any create/upload.
+            return job;
+        };
+        const verify = (remote, props, parent, size) => {
+            if (!remote || remote.trashed || remote.appProperties?.operation !== props.operation || (props.sha256 && remote.appProperties?.sha256 !== props.sha256) || (parent && !remote.parents?.includes(parent)) || (size != null && Number(remote.size) !== size)) throw new Error('Postojeći Drive fajl ne odgovara operaciji. Nema prepisivanja ili automatskog brisanja.');
+            return remote.id;
+        };
+        const ensureFile = async (key, metadata, blob) => {
+            const job = await reserve(key), props = { app: 'garancije-pro', operation: key, ...(blob ? { sha256: await sha256(blob) } : {}) };
+            const check = remote => verify(remote, props, metadata.parents?.[0], blob?.size);
+            const existing = await getFile(job.id); if (existing) { check(existing); mutateJournal(j => { j.jobs[key].state = 'confirmed'; }); return job.id; }
+            mutateJournal(j => { j.jobs[key].state = 'uncertain'; });
+            try {
+                const body = { ...metadata, id: job.id, appProperties: props };
+                let response;
+                if (blob) {
+                    response = await request(UPLOAD + '?uploadType=resumable', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Upload-Content-Type': blob.type, 'X-Upload-Content-Length': String(blob.size) }, body: JSON.stringify(body) });
+                    if (response.status !== 409) {
+                        if (!response.ok) await json(response);
+                        const location = response.headers.get('Location'); if (!location) throw new Error('Upload sesija nije potvrđena.');
+                        response = await request(location, { method: 'PUT', headers: { 'Content-Type': blob.type }, body: blob });
+                    }
+                } else response = await request(API + '/files', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                if (!response.ok && response.status !== 409) await json(response);
+                check(await getFile(job.id));
+                mutateJournal(j => { j.jobs[key].state = 'confirmed'; }); return job.id;
+            } catch (error) {
+                // Keep the SAME pre-generated ID. Never replace it after a timeout/unknown outcome.
+                throw new Error(error.message + ' Ishod može biti neizvestan; ponovni pokušaj proverava isti Drive ID. Nema automatskog brisanja.');
+            }
+        };
+        const api = {
+            mode: options.simulated ? 'simulated-drive' : 'google-drive', writesEnabled: !!options.allowWrites,
+            assertWriteAllowed(userId) {
+                assertUser(userId);
+                if (!options.allowWrites) throw new Error('Produkcioni upis nije aktiviran.');
+            },
+            subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+            getStatus: () => ({ state, message, account, expiresAt: deadline, simulated: !!options.simulated }),
+            disconnect,
+            async connect() {
+                if (connecting) return;
+                const user = getUser(); assertUser(user?.uid); connecting = true; const attempt = ++generation; state = 'connecting'; message = ''; notify();
+                try {
+                    const response = await authorize(); if (attempt !== generation) return;
+                    const scopes = new Set(String(response.scope || '').split(/\s+/).filter(Boolean));
+                    if (!scopes.has(SCOPE) || [...scopes].some(s => s !== SCOPE)) throw new Error('Google nije odobrio tačno drive.file. Povezivanje je zaustavljeno.');
+                    if (!response.access_token || !Number.isFinite(Number(response.expires_in)) || Number(response.expires_in) <= 30) throw new Error('Google token nije važeći.');
+                    token = response.access_token; deadline = now() + (Number(response.expires_in) - 30) * 1000;
+                    const about = await json(await request(API + '/about?fields=user(emailAddress)', {}, true)); if (attempt !== generation) return;
+                    if (about.user?.emailAddress?.toLowerCase() !== EMAIL || getUser()?.uid !== user.uid) throw new Error('Izabrani Google nalog nije ' + EMAIL + '. Nema čitanja priloga ili upisa.');
+                    account = EMAIL; state = 'connected'; message = ''; clearTimeout(timer); timer = setTimeout(() => disconnect('Drive sesija je istekla. Ponovo povežite Drive; nacrt je očuvan.'), Math.max(0, deadline - now())); notify();
+                } catch (error) { if (attempt === generation) { disconnect(); state = 'error'; message = error.message; notify(); } }
+                finally { connecting = false; }
+            },
+            getDraft(userId) { assertUser(userId); const d = journal().draft; return d ? structuredClone(d) : null; },
+            stageDraft({userId,id,base,metadata,attachments,pending}) {
+                assertUser(userId); let draft;
+                mutateJournal(j => {
+                    if(j.draft && (j.draft.id !== id) && !(id == null && !j.draft.edit)) throw new Error('Prvo nastavite sacuvani nacrt.');
+                    if(j.draft?.sealed) { draft=j.draft; return; }
+                    const previous=j.draft;
+                    draft={id:previous?.id || id || 'gp-'+crypto.randomUUID(), edit:previous?.edit ?? !!id, operationId:previous?.operationId || 'op-'+crypto.randomUUID(), expected:previous?.expected ?? canonical(base ?? null), metadata, attachments, pending:pending.map(({id,name,kind,mime,size,sha256})=>({id,name,kind,mime,size,sha256})), sealed:false};
+                    j.draft=draft;
+                }); return structuredClone(draft);
+            },
+            async checkFolders() {
+                const values=await Promise.all(Object.values(DRIVE_FOLDERS).map(folderInfo));
+                if(values.some((f,i)=>f.id!==Object.values(DRIVE_FOLDERS)[i] || f.name!==['baza-garancije-i-racuni','proizvodi','rezervne-kopije'][i]) || values.slice(1).some(f=>!f.parents?.includes(DRIVE_FOLDERS.root))) throw new Error('Postojeca hijerarhija se ne poklapa. Nema upisa.');
+                return DRIVE_FOLDERS;
+            },
+            async load({ userId, id, driveFileId, sha256: expectedHash }) {
+                assertUser(userId); needToken();
+                const response = await request(API + '/files/' + encodeURIComponent(driveFileId || id) + '?alt=media');
+                if (!response.ok) await json(response);
+                const blob = await response.blob(); if (!/^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(blob.type)) throw new Error('Prilog nije podržana slika.');
+                if (expectedHash && await sha256(blob) !== expectedHash) throw new Error('Originalni bajtovi ne odgovaraju sačuvanom hash-u.');
+                return blob;
+            },
+            async saveWarranty({ userId, newAttachments=[] }) {
+                api.assertWriteAllowed(userId);
+                if(!options.metadataStore?.read || !options.metadataStore?.commit) throw new Error('Cuvanje nije aktivirano. Nacrt je ocuvan.');
+                return lock(async()=>{
+                    let d=journal().draft; if(!d) throw new Error('Nema sacuvanog nacrta.');
+                    mutateJournal(j=>{j.draft.sealed=true;}); d=journal().draft;
+                    const current=await options.metadataStore.read(d.id,userId);
+                    if(current?.lastOperation===d.operationId) { mutateJournal(j=>{j.draft=null;}); return current.attachments || []; }
+                    if(canonical(current)!==d.expected) throw new Error('Zapis je u medjuvremenu promenjen. Nacrt je ocuvan; potrebno je uskladjivanje bez prepisivanja.');
+                    const refs=[...d.attachments];
+                    if(d.pending.length) { needToken(); await api.checkFolders(); }
+                    for(const a of d.pending) {
+                        const key=await hashText('upload:'+d.operationId+':'+a.sha256);
+                        const job=journal().jobs[key];
+                        const remote=job ? await getFile(job.id) : null;
+                        let fileId;
+                        if(remote) { verify(remote,{operation:key,sha256:a.sha256},DRIVE_FOLDERS.products,a.size); fileId=job.id; }
+                        else {
+                            const picked=newAttachments.find(p=>p.id===a.id && p.sha256===a.sha256);
+                            if(!(picked?.original instanceof Blob) || picked.original.size!==a.size || await sha256(picked.original)!==a.sha256) throw new Error('Ponovo izaberite original: '+a.name+'. Hash mora odgovarati nacrtu.');
+                            fileId=await ensureFile(key,{name:a.name,mimeType:a.mime,parents:[DRIVE_FOLDERS.products]},picked.original);
+                        }
+                        const detail=await json(await request(API+'/files/'+encodeURIComponent(fileId)+'?fields=id,ownedByMe,shared,permissions(type,role,emailAddress)'));
+                        if(!detail.ownedByMe || detail.shared!==false || !detail.permissions?.length || detail.permissions.some(p=>p.role!=='owner'||p.type!=='user'||p.emailAddress?.toLowerCase()!==EMAIL)) throw new Error('Privatnost priloga nije potvrdjena.');
+                        refs.push({...a,driveFileId:fileId,storage:'google-drive'});
+                    }
+                    // commit must atomically compare the complete original snapshot and merge only edited fields.
+                    await options.metadataStore.commit({id:d.id,userId,operationId:d.operationId,expected:d.expected,metadata:d.metadata,attachments:refs});
+                    mutateJournal(j=>{j.draft=null;});
+                    return refs;
+                });
+            },
+            sha256
+        };
+        return api;
+    }
+    window.createGarancijeDrive = createDriveService;
+    window.attachmentService = createDriveService(window.driveEnvironment || {});
+})();
+
+</script>
     <script type="text/babel" data-type="module">
         const { useState, useMemo, useEffect, useRef } = React;
 
+        // Calendar dates are local dates; UTC is used only for day differences.
+        const textValue = value => typeof value === 'string' ? value : '';
+        const dateInput = (d = new Date()) => [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
+        const parseDate = value => {
+            if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+            const [y, m, day] = value.split('-').map(Number);
+            if (y < 1) return null;
+            const d = new Date(0); d.setFullYear(y, m - 1, day); d.setHours(0, 0, 0, 0);
+            return d.getFullYear() === y && d.getMonth() === m - 1 && d.getDate() === day ? d : null;
+        };
+        const monthsValue = (value, min) => {
+            if (!['string', 'number'].includes(typeof value) || String(value).trim() === '') return null;
+            const n = Number(value);
+            return Number.isSafeInteger(n) && n >= min ? n : null;
+        };
         const calcExp = (pd, bm, em = 0) => {
-            const d = new Date(pd);
-            d.setMonth(d.getMonth() + parseInt(bm) + (parseInt(em) || 0));
+            const d = parseDate(pd), base = monthsValue(bm, 1), extra = monthsValue(em == null || em === '' ? 0 : em, 0);
+            if (!d || base === null || extra === null) return null;
+            const total = d.getFullYear() * 12 + d.getMonth() + base + extra;
+            if (!Number.isSafeInteger(total) || total >= 10000 * 12) return null;
+            const year = Math.floor(total / 12), month = total % 12;
+            const last = new Date(0); last.setFullYear(year, month + 1, 0); last.setHours(0, 0, 0, 0);
+            d.setDate(1); d.setFullYear(year, month, Math.min(Number(pd.slice(-2)), last.getDate()));
             return d;
         };
-
-        const calcDays = (ed) => {
-            const n = new Date(); n.setHours(0,0,0,0);
-            const e = new Date(ed); e.setHours(0,0,0,0);
-            return Math.ceil((e - n) / (1000 * 60 * 60 * 24));
+        const fmtDate = d => d instanceof Date && Number.isFinite(d.getTime()) ? new Intl.DateTimeFormat('bs').format(d) : 'Datum nije dostupan';
+        const calcDays = ed => {
+            if (!(ed instanceof Date) || !Number.isFinite(ed.getTime())) return null;
+            const n = new Date();
+            return Math.round((Date.UTC(ed.getFullYear(), ed.getMonth(), ed.getDate()) - Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())) / 86400000);
         };
-
-        const getStyle = (d) => {
-            if (d < 0) return { l: 'Istekla', c: 'text-red-700', bg: 'bg-red-50', i: 'x-circle' };
-            if (d <= 30) return { l: 'Ističe uskoro', c: 'text-amber-700', bg: 'bg-amber-50', i: 'alert-triangle' };
-            return { l: 'Važeća', c: 'text-emerald-700', bg: 'bg-emerald-50', i: 'check-circle' };
+        const getStyle = d => {
+            if (d === null) return { l: 'Proverite podatke', c: 'text-slate-700', bg: 'bg-slate-100' };
+            if (d < 0) return { l: 'Istekla', c: 'text-red-700', bg: 'bg-red-50' };
+            if (d <= 30) return { l: 'Ističe uskoro', c: 'text-amber-700', bg: 'bg-amber-50' };
+            return { l: 'Važeća', c: 'text-emerald-700', bg: 'bg-emerald-50' };
         };
+        const safeImage = value => typeof value === 'string' && /^(data:image\/(jpeg|png|webp|gif);base64,|https?:\/\/)/i.test(value) ? value : null;
 
         const Icon = ({ name, className }) => {
             const r = useRef(null);
@@ -71,6 +305,96 @@
             return <span ref={r} style={{ display: 'contents' }}></span>;
         };
 
+        const attachmentKinds = ['Račun', 'Garancija', 'Ostalo'];
+        const attachmentRefs = item => (Array.isArray(item?.attachments) ? item.attachments : []).filter(a => a && typeof a.id === 'string' && typeof a.name === 'string').map(a => ({ id: a.id, name: a.name, kind: attachmentKinds.includes(a.kind) ? a.kind : 'Ostalo', mime: textValue(a.mime) || 'image/jpeg', ...(typeof a.driveFileId === 'string' ? {driveFileId:a.driveFileId} : {}), ...(typeof a.sha256 === 'string' ? {sha256:a.sha256} : {}), ...(Number.isFinite(a.size) ? {size:a.size} : {}), ...(typeof a.storage === 'string' ? {storage:a.storage} : {}) }));
+        const legacyAttachments = item => ['receiptImage', 'warrantyImage'].filter(key => safeImage(item?.[key])).map(key => ({ id: key, name: key === 'receiptImage' ? 'Stari račun' : 'Stara garancija', kind: key === 'receiptImage' ? 'Račun' : 'Garancija', legacy: true, dataUrl: item[key] }));
+        const imageData = value => typeof value === 'string' && /^data:image\/(jpeg|png|webp|gif);base64,/i.test(value);
+        const readAttachment = async file => {
+            if (!/^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(file.type)) throw new Error('Izaberite podržanu sliku (PNG, JPEG, GIF, WebP, BMP ili AVIF).');
+            const dataUrl = URL.createObjectURL(file);
+            try {
+                await new Promise((resolve, reject) => { const img = new Image(); img.onload = () => img.width && img.height ? resolve() : reject(new Error()); img.onerror = reject; img.src = dataUrl; });
+                const sha256 = await window.attachmentService.sha256(file);
+                return { id: crypto.randomUUID(), name: file.name, kind: 'Račun', mime: file.type, size: file.size, original: file, sha256, dataUrl };
+            } catch { URL.revokeObjectURL(dataUrl); throw new Error('Slika nije čitljiva. Original nije poslat.'); }
+        };
+
+        function DriveConnection() {
+            const service = window.attachmentService;
+            const [status, setStatus] = useState(service.getStatus());
+            useEffect(() => service.subscribe(() => setStatus(service.getStatus())), [service]);
+            const connect = async () => { try { await service.connect(); } catch (error) { setStatus({state:'error',message:error.message}); } };
+            return <div className="no-print border rounded-xl p-3 space-y-2 bg-slate-50" aria-label="Drive povezivanje">
+                <p className="font-bold">{service.mode === 'simulated-drive' ? 'Simulacija Drive povezivanja' : 'Google Drive — priprema'}</p>
+                <p role="status">{status.state === 'connected' ? 'Povezan: ' + status.account : status.state === 'connecting' ? 'Povezivanje...' : 'Drive nije povezan.'}</p>
+                {status.message && <p role="alert" className="text-red-700">{status.message}</p>}
+                <p className="text-sm">Pristup drive.file obuhvata fajlove koje aplikacija kreira ili joj odobrite; nije ograničen samo jednim folderom.</p>
+                <button type="button" disabled={status.state === 'connecting'} onClick={connect} className="border border-blue-300 text-blue-700 rounded-xl px-3 py-2">{status.state === 'expired' || status.state === 'error' ? 'Ponovo poveži Drive' : status.state === 'connected' ? 'Obnovi Drive vezu' : 'Poveži Drive'}</button>
+                {status.state === 'connected' && <button type="button" onClick={() => service.disconnect()} className="border rounded-xl px-3 py-2 ml-2">Prekini lokalnu vezu</button>}
+                {!service.writesEnabled && <p className="text-sm">Folderi i upload su zaključani do zasebnog odobrenja. Povezivanje samo po sebi ne čuva priloge.</p>}
+            </div>;
+        }
+
+        function AttachmentViewer({ attachment, user, onClose }) {
+            const [src, setSrc] = useState(null), [error, setError] = useState(''), [attempt, setAttempt] = useState(0);
+            const [zoom, setZoom] = useState(false), [printPreview, setPrintPreview] = useState(false);
+            const dialog = useRef(null);
+            useEffect(() => { const el = dialog.current; el.showModal(); return () => el.close(); }, []);
+            useEffect(() => {
+                let active = true, objectUrl; setSrc(null); setError('');
+                (async () => {
+                    try {
+                        const value = attachment.dataUrl || await window.attachmentService?.load({ userId: user.uid, ...attachment });
+                        const display = value instanceof Blob ? (objectUrl = URL.createObjectURL(value)) : value;
+                        if (!(attachment.legacy ? safeImage(display) : (imageData(display) || (typeof display === 'string' && display.startsWith('blob:'))))) throw new Error();
+                        if (active) setSrc(display); else if (objectUrl) URL.revokeObjectURL(objectUrl);
+                    } catch (error) { if (active) setError('Prilog nije učitan. ' + error.message); }
+                })();
+                return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+            }, [attachment, user.uid, attempt]);
+            const download = () => {
+                if (!(imageData(src) || src?.startsWith('blob:'))) { setError('Preuzimanje ovog starog spoljnog linka nije dostupno bez konfigurisanog servisa.'); return; }
+                const link = document.createElement('a'); link.href = src;
+                link.download = attachment.name.replace(/[^\p{L}\p{N}._ -]/gu, '_') || 'prilog';
+                document.body.appendChild(link); link.click(); link.remove();
+            };
+            return <dialog ref={dialog} onCancel={e => { e.preventDefault(); onClose(); }} aria-label="Pregled priloga" className="attachment-dialog w-[95vw] max-w-4xl max-h-[95vh] rounded-2xl p-4 border shadow-xl">
+                <div className="no-print flex flex-wrap gap-2 justify-between items-center mb-4">
+                    <h3 className="font-bold break-all">{attachment.kind}: {attachment.name}</h3>
+                    <button type="button" onClick={onClose} className="border rounded-xl px-3 py-2">Zatvori pregled</button>
+                </div>
+                {error && <p role="alert" className="no-print text-red-700">{error} <button type="button" onClick={() => setAttempt(n => n + 1)} className="underline">Pokušaj ponovo</button></p>}
+                {!src && !error && <p role="status">Učitavanje priloga...</p>}
+                {src && <>
+                    <div className="no-print flex flex-wrap gap-2 mb-4">
+                        <button type="button" className="border rounded-xl px-3 py-2" onClick={() => setZoom(v => !v)}>{zoom ? 'Uklopi sliku' : 'Uvećaj'}</button>
+                        <button type="button" className="border rounded-xl px-3 py-2" onClick={download}>Preuzmi</button>
+                        <button type="button" className="border rounded-xl px-3 py-2" onClick={() => { setPrintPreview(v => !v); setZoom(false); }}>{printPreview ? 'Nazad na pregled' : 'Prikaz za štampu'}</button>
+                    </div>
+                    {printPreview && <div className="no-print mb-4"><p>Prikaz za štampu — jedan prilog. Štampa se ne pokreće automatski.</p><button type="button" className="border rounded-xl px-3 py-2" onClick={() => window.print()}>Otvori dijalog štampe</button></div>}
+                    <div className={printPreview ? 'print-sheet bg-white p-4 border' : 'overflow-auto'}>
+                        {printPreview && <p className="font-bold mb-3 break-all">{attachment.kind}: {attachment.name}</p>}
+                        <img style={zoom ? { width: "200%" } : undefined} src={src} alt={attachment.name} onError={() => { setSrc(null); setError('Slika ne može da se prikaže.'); }} className={zoom ? 'max-w-none' : 'max-w-full max-h-[65vh] mx-auto object-contain'} />
+                    </div>
+                </>}
+            </dialog>;
+        }
+
+        function AttachmentList({ attachments, user, onKindChange }) {
+            const [opened, setOpened] = useState(null);
+            return <section className="space-y-3" aria-label="Prilozi">
+                {attachments.length === 0 && <p className="text-slate-500">Nema priloga.</p>}
+                {attachments.map(a => <div key={a.id} className="border rounded-xl p-3 space-y-2 min-w-0">
+                    <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>Ponovo izaberite original za nastavak ili proverite vec poslati fajl preko Sacuvaj.</p>}
+                    {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
+                    {a.dataUrl && !a.legacy && <img src={a.dataUrl} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
+                    <button type="button" disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="text-blue-700 border rounded-xl px-3 py-2">Prikaži {a.name}</button>
+                </div>)}
+                {opened && <AttachmentViewer attachment={opened} user={user} onClose={() => setOpened(null)} />}
+            </section>;
+        }
+
+
         function App() {
             const [warranties, setWarranties] = useState([]);
             const [user, setUser] = useState(null);
@@ -78,33 +402,72 @@
             const [view, setView] = useState('list');
             const [selected, setSelected] = useState(null);
             const [search, setSearch] = useState('');
+            const [listState, setListState] = useState('loading');
+            const [retry, setRetry] = useState(0);
+            const [authError, setAuthError] = useState('');
+            const [formBusy, setFormBusy] = useState(false);
+            const filtered = warranties.filter(w => textValue(w.name).toLowerCase().includes(search.toLowerCase()));
 
             useEffect(() => {
-                if (!window.firebaseDeps) return;
-                return window.firebaseDeps.onAuthStateChanged(window.firebaseDeps.auth, u => {
-                    setUser(u);
-                    setLoading(false);
-                });
-            }, []);
+                let unsubscribe, active = true;
+                setLoading(true); setAuthError('');
+                const fail = () => { if (active) { setAuthError('Povezivanje nije uspelo. Pokušajte ponovo.'); setLoading(false); } };
+                const connect = () => {
+                    if (!window.firebaseDeps) return;
+                    clearInterval(timer); clearTimeout(timeout);
+                    try {
+                        unsubscribe = window.firebaseDeps.onAuthStateChanged(window.firebaseDeps.auth, u => {
+                            if (!active) return;
+                            setUser(u); setWarranties([]); setSelected(null); setView('list'); setLoading(false);
+                        }, fail);
+                    } catch { fail(); }
+                };
+                const timer = setInterval(connect, 100);
+                const timeout = setTimeout(() => { clearInterval(timer); fail(); }, 10000);
+                connect();
+                return () => { active = false; clearInterval(timer); clearTimeout(timeout); if (unsubscribe) unsubscribe(); };
+            }, [retry]);
 
             useEffect(() => {
                 if (!user || !window.firebaseDeps) return;
+                let active = true, unsubscribe;
+                setListState('loading');
                 const { db, appId, collection, onSnapshot } = window.firebaseDeps;
-                return onSnapshot(collection(db, 'artifacts', appId, 'users', user.uid, 'warranties'), s => {
-                    setWarranties(s.docs.map(d => ({ id: d.id, ...d.data() })));
-                });
-            }, [user]);
+                const fail = () => { if (active) setListState('error'); };
+                try {
+                    unsubscribe = onSnapshot(collection(db, 'artifacts', appId, 'users', user.uid, 'warranties'), snapshot => {
+                        if (!active) return;
+                        setWarranties(snapshot.docs.map(d => ({ ...d.data(), id: d.id })).filter(w => w.id !== 'gp-live-integration-test-001'));
+                        setListState('ready');
+                    }, fail);
+                } catch { fail(); }
+                return () => { active = false; if (unsubscribe) unsubscribe(); };
+            }, [user, retry]);
 
-            const login = () => window.firebaseDeps.signInWithPopup(window.firebaseDeps.auth, window.firebaseDeps.provider);
-            const logout = () => window.firebaseDeps.signOut(window.firebaseDeps.auth);
+            const openForm = (record=null) => {
+                try { const d=window.attachmentService.getDraft(user.uid);
+                    if(d) { setSelected(d.edit ? (warranties.find(w=>w.id===d.id)||{id:d.id}) : null); setView(d.edit?'edit':'add'); }
+                    else {setSelected(record);setView(record?'edit':'add');}
+                } catch(e) {setAuthError(e.message);}
+            };
+            const login = async () => {
+                try { setAuthError(''); await window.firebaseDeps.signInWithPopup(window.firebaseDeps.auth, window.firebaseDeps.provider); }
+                catch { setAuthError('Prijava nije uspela. Pokušajte ponovo.'); }
+            };
+            const logout = async () => {
+                try { window.attachmentService.disconnect(); await window.firebaseDeps.signOut(window.firebaseDeps.auth); }
+                catch { setAuthError('Odjava nije uspela. Pokušajte ponovo.'); }
+            };
 
-            if (loading) return <div className="min-h-screen flex items-center justify-center">Učitavanje...</div>;
+            if (loading) return <div role="status" className="min-h-screen flex items-center justify-center">Učitavanje...</div>;
+            if (authError && !window.firebaseDeps) return <div role="alert" className="p-6">{authError} <button onClick={() => setRetry(r => r + 1)}>Pokušaj ponovo</button></div>;
 
             if (!user) return (
                 <div className="min-h-screen flex items-center justify-center p-6 bg-slate-100">
                     <div className="bg-white p-8 rounded-2xl shadow-xl text-center max-w-sm w-full">
                         <Icon name="shield-check" className="w-12 h-12 text-blue-600 mx-auto mb-4" />
                         <h1 className="text-2xl font-bold mb-6">GarancijePro</h1>
+                        {authError && <p role="alert">{authError} <button onClick={() => setRetry(r => r + 1)}>Pokušaj ponovo</button></p>}
                         <button onClick={login} className="w-full bg-slate-900 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2">
                             <Icon name="log-in" className="w-5 h-5" /> Prijavi se Google-om
                         </button>
@@ -116,123 +479,235 @@
                 <div className="min-h-screen pb-10">
                     <header className="bg-white border-b p-4 sticky top-0 z-10">
                         <div className="max-w-5xl mx-auto flex justify-between items-center">
-                            <div className="flex items-center gap-2" onClick={() => setView('list')}>
+                            <div className="flex items-center gap-2" onClick={() => { if (!formBusy && view !== 'add' && view !== 'edit') setView('list'); }}>
                                 <div className="bg-blue-600 p-1.5 rounded-lg text-white"><Icon name="shield-check" className="w-5 h-5" /></div>
                                 <span className="font-bold text-xl">GarancijePro</span>
                             </div>
                             <div className="flex gap-2">
-                                <button onClick={() => setView('add')} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold text-sm">Dodaj</button>
-                                <button onClick={logout} className="p-2 text-slate-400"><Icon name="log-out" className="w-5 h-5" /></button>
+                                <button disabled={view === 'add' || view === 'edit' || formBusy} onClick={() => openForm()} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold text-sm">Dodaj</button>
+                                <button aria-label="Odjavi se" disabled={view === 'add' || view === 'edit' || formBusy} onClick={logout} className="p-2 text-slate-400"><Icon name="log-out" className="w-5 h-5" /></button>
                             </div>
                         </div>
                     </header>
 
                     <main className="max-w-5xl mx-auto p-4">
+                        <div className="mb-4"><DriveConnection /></div>
+                        {view === "list" && <button className="border rounded-xl px-3 py-2 mb-3" onClick={() => openForm()}>Nastavi nacrt / novi unos</button>}
+                        {authError && <p role="alert">{authError}</p>}
                         {view === 'list' && (
                             <div className="space-y-4">
                                 <input type="text" placeholder="Pretraži..." value={search} onChange={e => setSearch(e.target.value)} className="w-full p-3 border rounded-xl" />
+                                {listState === 'loading' && <p role="status">Učitavanje garancija...</p>}
+                                {listState === 'error' && <div role="alert">Garancije nisu učitane. <button onClick={() => setRetry(r => r + 1)} className="text-blue-600 underline">Pokušaj ponovo</button></div>}
+                                {listState === 'ready' && filtered.length === 0 && <p role="status">{warranties.length === 0 ? 'Još nema garancija. Dodajte prvu garanciju.' : 'Nema rezultata za ovu pretragu.'}</p>}
                                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                                    {warranties.filter(w => w.name?.toLowerCase().includes(search.toLowerCase())).map(w => {
+                                    {(listState === 'ready' ? filtered : []).map(w => {
                                         const exp = calcExp(w.purchaseDate, w.baseMonths, w.extendedMonths);
                                         const st = getStyle(calcDays(exp));
                                         return (
                                             <div key={w.id} onClick={() => { setSelected(w); setView('detail'); }} className="bg-white p-5 rounded-2xl border shadow-sm cursor-pointer">
                                                 <div className="flex justify-between mb-2">
-                                                    <span className="text-xs font-bold text-slate-400 uppercase">{w.category}</span>
+                                                    <span className="text-xs font-bold text-slate-400 uppercase">{textValue(w.category) || 'Ostalo'}</span>
                                                     <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${st.bg} ${st.c}`}>{st.l}</span>
                                                 </div>
-                                                <h3 className="font-bold text-lg mb-4 truncate">{w.name}</h3>
-                                                <div className="text-xs text-slate-500 border-t pt-3">Ističe: {new Intl.DateTimeFormat('bs').format(exp)}</div>
+                                                <h3 className="font-bold text-lg mb-4 truncate">{textValue(w.name) || 'Bez naziva'}</h3>
+                                                <div className="text-xs text-slate-500 border-t pt-3">Ističe: {fmtDate(exp)}</div>
                                             </div>
                                         );
                                     })}
                                 </div>
                             </div>
                         )}
-                        {view === 'add' && <AddForm onCancel={() => setView('list')} onSave={() => setView('list')} user={user} />}
-                        {view === 'detail' && selected && <Detail item={selected} onBack={() => setView('list')} user={user} />}
+                        {(view === 'add' || view === 'edit') && <AddForm key={view === 'edit' ? selected.id : 'new'} initial={view === 'edit' ? selected : null} onBusy={setFormBusy} onCancel={() => setView(view === 'edit' ? 'detail' : 'list')} onSave={() => setView('list')} user={user} />}
+                        {view === 'detail' && selected && <Detail onEdit={() => openForm(selected)} item={selected} onBack={() => setView('list')} user={user} />}
                     </main>
                 </div>
             );
         }
 
-        function AddForm({ onCancel, onSave, user }) {
-            const [form, setForm] = useState({ name: '', category: 'Alati', purchaseDate: new Date().toISOString().split('T')[0], baseMonths: 24, extendedMonths: 0, receiptImage: null });
-            const [saving, setSaving] = useState(false);
+        function AddForm({ onCancel, onSave, onBusy, user, initial = null }) {
+            const service = window.attachmentService;
+            const restored = useRef(service.getDraft(user.uid));
+            const [sealed, setSealed] = useState(!!restored.current?.sealed);
+            const [form, setForm] = useState(() => restored.current?.metadata || ({
+                name: textValue(initial?.name), category: textValue(initial?.category) || 'Alati',
+                purchaseDate: initial ? (parseDate(initial.purchaseDate) ? initial.purchaseDate : '') : dateInput(),
+                baseMonths: initial ? (monthsValue(initial.baseMonths, 1) ?? '') : 24,
+                extendedMonths: initial ? (monthsValue(initial.extendedMonths ?? 0, 0) ?? '') : 0,
+                store: textValue(initial?.store), description: textValue(initial?.description)
+            }));
+            const [attachments, setAttachments] = useState(() => restored.current?.attachments || attachmentRefs(initial));
+            const [pending, setPending] = useState(() => restored.current?.pending || []);
+            const pendingUrls = useRef(new Set());
 
-            const handleFile = (e) => {
-                const f = e.target.files[0];
-                if (!f) return;
-                const r = new FileReader();
-                r.onloadend = () => {
-                    const img = new Image();
-                    img.src = r.result;
-                    img.onload = () => {
-                        const canvas = document.createElement('canvas');
-                        const M = 800; let w = img.width, h = img.height;
-                        if (w > h && w > M) { h *= M / w; w = M; } else if (h > M) { w *= M / h; h = M; }
-                        canvas.width = w; canvas.height = h;
-                        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-                        setForm({ ...form, receiptImage: canvas.toDataURL('image/jpeg', 0.6) });
-                    };
-                };
-                r.readAsDataURL(f);
+            const legacy = legacyAttachments(initial);
+            const needsService = pending.length > 0 || attachments.length > 0;
+            const malformedAttachments = initial?.attachments != null && (!Array.isArray(initial.attachments) || attachmentRefs(initial).length !== initial.attachments.length);
+            const [saving, setSaving] = useState(false);
+            const [processing, setProcessing] = useState(false);
+            const [error, setError] = useState('');
+            const [imageError, setImageError] = useState('');
+            const savingRef = useRef(false), processingRef = useRef(0);
+            const mounted = useRef(true);
+            useEffect(() => {
+                mounted.current = true;
+                return () => { mounted.current = false; for (const url of pendingUrls.current) URL.revokeObjectURL(url); };
+            }, []);
+            useEffect(() => { onBusy(saving); return () => onBusy(false); }, [saving, onBusy]);
+            useEffect(() => {
+                try { const {id, ...base} = initial || {}; service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:form,attachments,pending}); }
+                catch(e) { setError(e.message); }
+            }, [form,attachments,pending]);
+            const change = (field, value) => { if(!sealed) setForm(previous => ({ ...previous, [field]: value })); };
+            const expiry = calcExp(form.purchaseDate, form.baseMonths, form.extendedMonths);
+
+            const handleFile = async e => {
+                if (savingRef.current) return;
+                const files = Array.from(e.target.files); e.target.value = '';
+                if (!files.length) return;
+                processingRef.current++; setProcessing(true); setImageError('');
+                try {
+                    const results = await Promise.allSettled(files.map(readAttachment));
+                    const good = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+                    if (!mounted.current) { for (const a of good) URL.revokeObjectURL(a.dataUrl); return; }
+                    for (const a of good) pendingUrls.current.add(a.dataUrl);
+                    setPending(previous => {
+                        const result=[...previous];
+                        for(const a of good) {
+                            const index=result.findIndex(p=>!p.original && p.sha256===a.sha256 && p.size===a.size);
+                            if(index>=0) result[index]={...a,id:result[index].id,kind:result[index].kind};
+                            else if(!sealed) result.push(a);
+                            else setImageError('Izabrani fajl ne odgovara originalima sacuvanog nacrta.');
+                        } return result;
+                    });
+                    const failed = results.filter(r => r.status === 'rejected').length;
+                    if (failed) setImageError(failed + ' slika nije obrađeno. Prethodni prilozi su sačuvani; izaberite neuspele slike ponovo.');
+                } finally {
+                    processingRef.current--;
+                    if (mounted.current) setProcessing(processingRef.current > 0);
+                }
+            };
+            const changeKind = (id, kind) => {
+                setAttachments(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
+                setPending(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
             };
 
-            const submit = async (e) => {
-                e.preventDefault(); setSaving(true);
-                const { db, appId, collection, addDoc } = window.firebaseDeps;
-                await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'warranties'), { ...form, createdAt: new Date().toISOString() });
-                onSave();
+            const submit = async e => {
+                e.preventDefault();
+                if (savingRef.current || processingRef.current) return;
+                if (!form.name.trim() || !expiry || form.purchaseDate > dateInput() || form.description.length > 150) {
+                    setError('Unesite naziv, ispravan datum kupovine koji nije u budućnosti, celo trajanje u mesecima i opis do 150 karaktera.');
+                    return;
+                }
+                if (malformedAttachments) { setError('Postojeći podaci o prilozima nisu podržani. Čuvanje je zaustavljeno da bi ostali očuvani.'); return; }
+                if (needsService && !service?.saveWarranty) { setError('Servis priloga nije konfigurisan. Nema čuvanja niti slanja priloga. Unos ostaje u formi.'); return; }
+                savingRef.current = true; setSaving(true); setError('');
+                try {
+                    const {id, ...base} = initial || {};
+                    const data = { ...form, name: form.name.trim(), store: form.store.trim(), baseMonths: Number(form.baseMonths), extendedMonths: Number(form.extendedMonths) };
+                    service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:data,attachments,pending});
+                    setSealed(true);
+                    await service.saveWarranty({userId:user.uid,newAttachments:pending});
+                    if (mounted.current) onSave();
+                } catch (error) {
+                    if (mounted.current) setError('Čuvanje nije uspelo. Unos je sačuvan u ovoj formi. ' + error.message);
+                } finally {
+                    savingRef.current = false;
+                    if (mounted.current) setSaving(false);
+                }
             };
 
             return (
-                <form onSubmit={submit} className="bg-white p-6 rounded-2xl border shadow-sm space-y-4 max-w-xl mx-auto">
-                    <h2 className="text-xl font-bold mb-4">Nova garancija</h2>
-                    <input type="text" required placeholder="Naziv proizvoda" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className="w-full p-3 border rounded-xl" />
-                    <div className="grid grid-cols-2 gap-4">
-                        <input type="date" value={form.purchaseDate} onChange={e => setForm({ ...form, purchaseDate: e.target.value })} className="p-3 border rounded-xl" />
-                        <select value={form.baseMonths} onChange={e => setForm({ ...form, baseMonths: e.target.value })} className="p-3 border rounded-xl">
-                            <option value={12}>12 mj.</option><option value={24}>24 mj.</option><option value={60}>60 mj.</option>
-                        </select>
-                    </div>
-                    <label className="block p-4 border-2 border-dashed rounded-xl text-center cursor-pointer hover:bg-slate-50">
-                        <input type="file" accept="image/*" onChange={handleFile} className="hidden" />
-                        <Icon name="camera" className="w-6 h-6 mx-auto mb-1 text-slate-400" />
-                        <span className="text-sm font-bold text-slate-500 uppercase">{form.receiptImage ? 'Račun dodat' : 'Slikaj račun'}</span>
-                    </label>
-                    <div className="flex gap-2 pt-4">
-                        <button type="button" onClick={onCancel} className="flex-1 py-3 font-bold text-slate-500">Odustani</button>
-                        <button type="submit" disabled={saving} className="flex-1 py-3 bg-blue-600 text-white rounded-xl font-bold">{saving ? 'Spremanje...' : 'Sačuvaj'}</button>
-                    </div>
+                <form onSubmit={submit} aria-busy={saving || processing} className="bg-white p-6 rounded-2xl border shadow-sm space-y-4 max-w-xl mx-auto">
+                    <h2 className="text-xl font-bold mb-4">{initial ? 'Izmena garancije' : 'Nova garancija'}</h2>
+                    <p className="text-sm mb-3">Nacrt se cuva na ovom uredjaju. Odustani zatvara formu i zadrzava nacrt.</p>
+                    {sealed && <p role="status">Nastavak zapocetog cuvanja: podaci su zakljucani dok se ishod ne potvrdi. Nedostajuce originale izaberite ponovo.</p>}
+                    {error && <p role="alert" className="text-red-700">{error}</p>}
+                    <fieldset disabled={saving} className="space-y-4">
+                        <label className="block">Naziv proizvoda
+                            <input type="text" required value={form.name} disabled={sealed} onChange={e => change('name', e.target.value)} className="w-full p-3 border rounded-xl" />
+                        </label>
+                        <label className="block">Prodavnica (opciono)
+                            <input type="text" value={form.store} disabled={sealed} onChange={e => change('store', e.target.value)} className="w-full p-3 border rounded-xl" />
+                        </label>
+                        <label className="block">Opis (opciono)
+                            <textarea maxLength={150} aria-describedby="description-count" value={form.description} disabled={sealed} onChange={e => change('description', e.target.value)} className="w-full p-3 border rounded-xl" />
+                            <span id="description-count" className="text-sm text-slate-500">{form.description.length}/150 karaktera</span>
+                        </label>
+                        <div className="grid sm:grid-cols-2 gap-4">
+                            <label>Datum kupovine<input type="date" required max={dateInput()} value={form.purchaseDate} disabled={sealed} onChange={e => change('purchaseDate', e.target.value)} className="w-full p-3 border rounded-xl" /></label>
+                            <label>Trajanje (meseci)<input type="number" required min="1" step="1" value={form.baseMonths} disabled={sealed} onChange={e => change('baseMonths', e.target.value)} className="w-full p-3 border rounded-xl" /></label>
+                            <label>Produžena garancija (meseci)<input type="number" required min="0" step="1" value={form.extendedMonths} disabled={sealed} onChange={e => change('extendedMonths', e.target.value)} className="w-full p-3 border rounded-xl" /></label>
+                        </div>
+                        <p role="status" className="bg-slate-50 p-3 rounded-xl">Ističe: {fmtDate(expiry)}</p>
+                        {(service?.mode === 'simulated-drive' || !service?.writesEnabled) && <div className="bg-slate-50 p-3 rounded-xl text-sm">
+                            {service?.mode === 'simulated-drive' ? 'SIMULACIJA: podaci i slike ostaju u lokalnom demo skladistu i posle osvezavanja. Nema stvarnog Drive-a.' : 'Lokalna priprema: produkcioni upis nije aktiviran.'}
+                        </div>}
+                        <label className="block p-4 border-2 border-dashed rounded-xl">
+                            Dodaj originalne slike (možete izabrati više)
+                            <input type="file" multiple accept="image/*" onChange={handleFile} className="block w-full text-sm mt-2" />
+                        </label>
+                        {processing && <p role="status">Obrada fotografija...</p>}
+                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} />
+                        {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
+                        {imageError && <p role="alert" className="text-red-700">{imageError}</p>}
+                        <div className="flex gap-2 pt-4">
+                            <button type="button" onClick={onCancel} className="flex-1 py-3 border border-slate-300 rounded-xl font-bold text-slate-500">Odustani</button>
+                            <button type="submit" disabled={saving || processing} className="flex-1 py-3 bg-blue-600 text-white rounded-xl font-bold disabled:opacity-50">{saving ? 'Čuvanje...' : error ? 'Pokušaj ponovo' : 'Sačuvaj'}</button>
+                        </div>
+                    </fieldset>
                 </form>
             );
         }
 
-        function Detail({ item, onBack, user }) {
+        function Detail({ item, onBack, onEdit, user }) {
             const exp = calcExp(item.purchaseDate, item.baseMonths, item.extendedMonths);
+            const service = window.attachmentService;
+            const [deleteError, setDeleteError] = useState('');
+            const canDelete = (() => {
+                try {
+                    if (!service?.assertWriteAllowed) return false;
+                    service.assertWriteAllowed(user?.uid);
+                    return true;
+                } catch { return false; }
+            })();
             const del = async () => {
-                if (!confirm('Obrisati?')) return;
-                const { db, appId, doc, deleteDoc } = window.firebaseDeps;
-                await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'warranties', item.id));
-                onBack();
+                setDeleteError('');
+                try {
+                    if (!service?.assertWriteAllowed) throw new Error('Servis za upis nije dostupan.');
+                    service.assertWriteAllowed(user?.uid);
+                    if (!confirm('Obrisati?')) return;
+                    service.assertWriteAllowed(user?.uid);
+                    const { db, appId, doc, deleteDoc } = window.firebaseDeps;
+                    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'warranties', item.id));
+                    onBack();
+                } catch (error) {
+                    setDeleteError('Brisanje nije uspelo. ' + error.message);
+                }
             };
             return (
                 <div className="bg-white rounded-2xl border shadow-sm overflow-hidden max-w-xl mx-auto">
                     <div className="p-6 border-b flex justify-between items-center">
                         <button onClick={onBack}><Icon name="arrow-left" className="w-6 h-6" /></button>
-                        <button onClick={del} className="text-red-500"><Icon name="trash-2" className="w-6 h-6" /></button>
+                        <button onClick={onEdit} className="text-blue-600 font-bold">Izmeni</button>
+                        <button aria-label="Obriši garanciju" disabled={!canDelete} onClick={del} className="text-red-500 disabled:opacity-50 disabled:cursor-not-allowed"><Icon name="trash-2" className="w-6 h-6" /></button>
                     </div>
                     <div className="p-6 space-y-6">
+                        {deleteError && <p role="alert" className="text-red-700">{deleteError}</p>}
                         <div>
-                            <span className="text-xs font-bold text-blue-600 uppercase">{item.category}</span>
-                            <h2 className="text-2xl font-bold">{item.name}</h2>
+                            <span className="text-xs font-bold text-blue-600 uppercase">{textValue(item.category) || 'Ostalo'}</span>
+                            <h2 className="text-2xl font-bold">{textValue(item.name) || 'Bez naziva'}</h2>
                         </div>
                         <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl">
-                            <div><span className="text-[10px] uppercase font-bold text-slate-400">Kupljeno</span><p className="font-bold">{new Intl.DateTimeFormat('bs').format(new Date(item.purchaseDate))}</p></div>
-                            <div><span className="text-[10px] uppercase font-bold text-slate-400">Ističe</span><p className="font-bold text-blue-600">{new Intl.DateTimeFormat('bs').format(exp)}</p></div>
+                            <div><span className="text-[10px] uppercase font-bold text-slate-400">Kupljeno</span><p className="font-bold">{fmtDate(parseDate(item.purchaseDate))}</p></div>
+                            <div><span className="text-[10px] uppercase font-bold text-slate-400">Ističe</span><p className="font-bold text-blue-600">{fmtDate(exp)}</p></div>
                         </div>
-                        {item.receiptImage && <img src={item.receiptImage} className="w-full rounded-xl border" />}
+                        {!exp && <p role="status">Ovaj zapis ima nepotpune ili neispravne podatke. Izmenite ga da biste dobili tačan datum isteka.</p>}
+                        {textValue(item.store) && <p><strong>Prodavnica:</strong> {item.store}</p>}
+                        {textValue(item.description) && <p className="break-words"><strong>Opis:</strong> {item.description}</p>}
+                        <h3 className="font-bold">Prilozi</h3>
+                        <AttachmentList attachments={[...legacyAttachments(item), ...attachmentRefs(item)]} user={user} />
+                        {legacyAttachments(item).length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi su već deo učitanog zapisa; nisu migrirani.</p>}
                     </div>
                 </div>
             );
