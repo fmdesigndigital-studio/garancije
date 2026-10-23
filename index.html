@@ -65,16 +65,17 @@
         .qr-actions button { flex:1 1 9rem; }
         .qr-preview { display:grid; gap:.6rem; }
         .qr-reader video { max-width:100%; }
+        .attachment-print-root { display: none; }
+        .attachment-dialog button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
         @media print {
-            body { background: white !important; margin: 0 !important; }
-            body * { visibility: hidden; }
-            #root { height: 0 !important; overflow: visible !important; }
-            dialog::backdrop { background: transparent !important; }
-            .attachment-dialog, .attachment-dialog * { visibility: visible; }
-            .attachment-dialog { position: fixed !important; inset: 0 !important; width: 100% !important; max-width: none !important; max-height: none !important; height: 100% !important; margin: 0 !important; padding: 0 !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; overflow: visible !important; background: white !important; }
-            .attachment-dialog .no-print, .attachment-dialog .no-print * { display: none !important; }
-            .attachment-dialog img { max-width: 100% !important; max-height: 90vh !important; object-fit: contain; }
-            .print-sheet { border: 0; }
+            @page { size: A4; margin: 10mm; }
+            body:has(.attachment-print-root) { background: white !important; margin: 0 !important; }
+            /* Remove the modal and the underlying app from pagination, rather than hiding their paint. */
+            body:has(.attachment-print-root) > :not(.attachment-print-root) { display: none !important; }
+            .attachment-print-root { display: block !important; width: 100%; margin: 0; padding: 0; }
+            .attachment-print-image { display: block; width: auto; height: auto; max-width: 100%; max-height: 277mm; margin: 0 auto; break-inside: avoid; }
+            /* Tall receipts flow over page boundaries once, without a fixed element repeating. */
+            .attachment-print-image.is-long { width: 100%; max-height: none; break-inside: auto; }
         }
     </style>
 </head>
@@ -402,10 +403,16 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         function AttachmentViewer({ attachment, user, onClose }) {
             const [src, setSrc] = useState(null), [error, setError] = useState(''), [attempt, setAttempt] = useState(0);
             const [zoom, setZoom] = useState(false), [printPreview, setPrintPreview] = useState(false);
-            const dialog = useRef(null);
-            useEffect(() => { const el = dialog.current; el.showModal(); return () => el.close(); }, []);
+            const dialog = useRef(null), printImage = useRef(null);
+            const [printTarget, setPrintTarget] = useState(null), [printSize, setPrintSize] = useState(null);
             useEffect(() => {
-                let active = true, objectUrl; setSrc(null); setError('');
+                const el = dialog.current, host = document.createElement('div');
+                host.className = 'attachment-print-root'; document.body.appendChild(host); setPrintTarget(host);
+                el.showModal();
+                return () => { el.close(); host.remove(); };
+            }, []);
+            useEffect(() => {
+                let active = true, objectUrl; setSrc(null); setPrintSize(null); setError('');
                 (async () => {
                     try {
                         const value = attachment.dataUrl || await window.attachmentService?.load({ userId: user.uid, ...attachment });
@@ -416,32 +423,51 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 })();
                 return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
             }, [attachment, user.uid, attempt]);
+            const printReady = !!src && printSize?.src === src && !error;
+            const printAttachment = () => {
+                const image = printImage.current;
+                if (!printReady || !image?.complete || !image.naturalWidth) return;
+                window.print();
+            };
             const download = () => {
                 if (!(imageData(src) || src?.startsWith('blob:'))) { setError('Preuzimanje ovog starog spoljnog linka nije dostupno bez konfigurisanog servisa.'); return; }
                 const link = document.createElement('a'); link.href = src;
                 link.download = attachment.name.replace(/[^\p{L}\p{N}._ -]/gu, '_') || 'prilog';
                 document.body.appendChild(link); link.click(); link.remove();
             };
-            return <dialog ref={dialog} onCancel={e => { e.preventDefault(); onClose(); }} aria-label="Pregled priloga" className="attachment-dialog w-[95vw] max-w-4xl max-h-[95vh] rounded-2xl p-4 border shadow-xl">
+            return <><dialog ref={dialog} onCancel={e => { e.preventDefault(); onClose(); }} aria-label="Pregled priloga" className="attachment-dialog w-[95vw] max-w-4xl max-h-[95vh] rounded-2xl p-4 border shadow-xl">
                 <div className="no-print flex flex-wrap gap-2 justify-between items-center mb-4">
                     <h3 className="font-bold break-all">{attachment.kind}: {attachment.name}</h3>
-                    <button type="button" onClick={onClose} className="border rounded-xl px-3 py-2">Zatvori pregled</button>
+                    <button type="button" onClick={onClose} className="border rounded-xl px-3 py-2">{printPreview ? 'Nazad na garanciju' : 'Zatvori pregled'}</button>
                 </div>
                 {error && <p role="alert" className="no-print text-red-700">{error} <button type="button" onClick={() => setAttempt(n => n + 1)} className="underline">Pokušaj ponovo</button></p>}
-                {!src && !error && <p role="status">Učitavanje priloga...</p>}
+                {!src && !error && <p role="status" className="no-print">Učitavanje priloga...</p>}
                 {src && <>
                     <div className="no-print flex flex-wrap gap-2 mb-4">
                         <button type="button" className="border rounded-xl px-3 py-2" onClick={() => setZoom(v => !v)}>{zoom ? 'Uklopi sliku' : 'Uvećaj'}</button>
                         <button type="button" className="border rounded-xl px-3 py-2" onClick={download}>Preuzmi</button>
                         <button type="button" className="border rounded-xl px-3 py-2" onClick={() => { setPrintPreview(v => !v); setZoom(false); }}>{printPreview ? 'Nazad na pregled' : 'Prikaz za štampu'}</button>
                     </div>
-                    {printPreview && <div className="no-print mb-4"><p>Izaberi štampač ili sačuvaj ovaj prilog kao PDF.</p><button type="button" className="border rounded-xl px-3 py-2" onClick={() => window.print()}>Štampaj / Sačuvaj kao PDF</button></div>}
+                    {printPreview && <div className="no-print mb-4 space-y-2">
+                        <p>Izaberi štampač ili sačuvaj ovaj prilog kao PDF.</p>
+                        <p>Iz sistemskog pregleda štampe vratite se dugmetom Nazad na telefonu.</p>
+                        {!printReady && !error && <p role="status">Priprema slike za štampu...</p>}
+                        <button type="button" className="border rounded-xl px-3 py-2 disabled:opacity-50" disabled={!printReady} onClick={printAttachment}>Štampaj / Sačuvaj kao PDF</button>
+                    </div>}
                     <div className={printPreview ? 'print-sheet bg-white p-4 border' : 'overflow-auto'}>
                         {printPreview && <p className="font-bold mb-3 break-all">{attachment.kind}: {attachment.name}</p>}
                         <img style={zoom ? { width: "200%" } : undefined} src={src} alt={attachment.name} onError={() => { setSrc(null); setError('Slika ne može da se prikaže.'); }} className={zoom ? 'max-w-none' : 'max-w-full max-h-[65vh] mx-auto object-contain'} />
                     </div>
                 </>}
-            </dialog>;
+            </dialog>
+                {printTarget && src && ReactDOM.createPortal(
+                    <img ref={printImage} src={src} alt={attachment.name}
+                        className={'attachment-print-image' + (printSize?.src === src && printSize.height > printSize.width * 2 ? ' is-long' : '')}
+                        onLoad={e => { const image = e.currentTarget; setPrintSize({ src, width: image.naturalWidth, height: image.naturalHeight }); }}
+                        onError={() => { setPrintSize(null); setError('Slika ne može da se pripremi za štampu.'); }} />,
+                    printTarget
+                )}
+            </>;
         }
 
         function AttachmentList({ attachments, user, onKindChange }) {
@@ -464,7 +490,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.23.2';
+        const RELEASE_VERSION = '2026.10.23.3';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
