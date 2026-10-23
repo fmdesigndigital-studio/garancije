@@ -9,6 +9,7 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="./vendor/html5-qrcode.min.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         ::-webkit-scrollbar { width: 6px; }
@@ -58,6 +59,12 @@
         @media (min-width:640px) { .catalog-toolbar { grid-template-columns:auto minmax(0,2fr) minmax(0,1fr); align-items:end; } .catalog-filter-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .catalog-search { grid-template-columns:minmax(0,1fr) auto; align-items:end; } .catalog-list-row { grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr); } }
         @media (min-width:1024px) { .catalog-detail-head, .catalog-detail-row { display:grid; grid-template-columns:minmax(0,2fr) repeat(5,minmax(0,1fr)) minmax(0,2fr) minmax(0,.7fr); gap:.65rem; padding:1rem; } .catalog-detail-head { font-weight:700; background:#f1f5f9; border-radius:1rem 1rem 0 0; } .catalog-cell-label { display:none; } }
 
+        .receipt-qr { min-width:0; border:1px solid #cbd5e1; border-radius:1rem; padding:1rem; display:grid; gap:.75rem; overflow-wrap:anywhere; }
+        .receipt-qr * { min-width:0; max-width:100%; }
+        .qr-actions { display:flex; flex-wrap:wrap; gap:.5rem; }
+        .qr-actions button { flex:1 1 9rem; }
+        .qr-preview { display:grid; gap:.6rem; }
+        .qr-reader video { max-width:100%; }
         @media print {
             body { background: white !important; margin: 0 !important; }
             body * { visibility: hidden; }
@@ -111,7 +118,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
    const snapshot=await tx.get(ref),current=snapshot.exists()?snapshot.data():null;
    if(current?.lastOperation===operationId)return;
    if(window.garancijeFingerprint(current)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je očuvan.');
-   const safe=Object.fromEntries(['name','category','purchaseDate','baseMonths','extendedMonths','store','description'].map(k=>[k,metadata[k]]).filter(([,v])=>v!==undefined));
+   const safe=Object.fromEntries(['name','category','purchaseDate','baseMonths','extendedMonths','store','description','purchasePriceMinor','currency','invoiceNumber','fiscalReceiptUrl'].map(k=>[k,metadata[k]]).filter(([,v])=>v!==undefined));
    tx.set(ref,{...safe,attachments,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
   });
  }
@@ -457,7 +464,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.23.1';
+        const RELEASE_VERSION = '2026.10.23.2';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -469,7 +476,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return Number.isFinite(n) ? n : null;
             } catch { return null; }
         };
-        const formMetadata = (form, initial) => ({...form,name:form.name.trim(),store:form.store.trim(),baseMonths:Number(form.baseMonths),extendedMonths:Number(form.extendedMonths),category:form.category === '' ? initial?.category : form.category});
+        const formMetadata = (form, initial) => { const {purchasePrice,...rest}=form; return {...rest,name:form.name.trim(),store:form.store.trim(),baseMonths:Number(form.baseMonths),extendedMonths:Number(form.extendedMonths),category:form.category === '' ? initial?.category : form.category,purchasePriceMinor:purchasePrice===undefined?initial?.purchasePriceMinor:toMinor(purchasePrice),currency:textValue(form.currency).trim()||initial?.currency,invoiceNumber:textValue(form.invoiceNumber).trim()||initial?.invoiceNumber,fiscalReceiptUrl:textValue(form.fiscalReceiptUrl).trim()||initial?.fiscalReceiptUrl}; };
         const catalogRows = (records, search, filters, sort) => {
             const q=normalizeSearch(search);
             const rows=records.filter(w=>w.id!=='gp-live-integration-test-001').map((w,index)=>({w,index,exp:calcExp(w.purchaseDate,w.baseMonths,w.extendedMonths)})).map(r=>({...r,days:calcDays(r.exp)}));
@@ -497,6 +504,109 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             });
             return found;
         };
+
+        const fiscalLink = raw => {
+            if(typeof raw!=='string'||raw.length>2048||raw!==raw.trim())throw Error('Neispravan fiskalni link.');
+            const u=new URL(raw);
+            if(u.protocol!=='https:'||u.hostname!=='mapr.tax.gov.me'||u.port||u.username||u.password||u.pathname!=='/ic/'||u.search||!u.hash.startsWith('#/verify?'))throw Error('Dozvoljen je samo HTTPS fiskalni link sa domena mapr.tax.gov.me.');
+            const p=new URLSearchParams(u.hash.slice(9)),keys=['iic','tin','crtd','ord','bu','cr','sw','prc'];
+            if([...p.keys()].some(k=>!keys.includes(k))||keys.some(k=>p.getAll(k).length!==1))throw Error('Fiskalni link nema ispravne parametre.');
+            if(!/^[A-Fa-f0-9]{32}$/.test(p.get('iic'))||!/^\d{8}$/.test(p.get('tin'))||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(p.get('crtd'))||!parseDate(p.get('crtd').slice(0,10))||!Number.isFinite(Date.parse(p.get('crtd')))||new Date(p.get('crtd')).toISOString().replace('.000Z','Z')!==p.get('crtd')||!/^\d{1,12}$/.test(p.get('ord'))||['bu','cr','sw'].some(k=>!(/^[a-zA-Z0-9]{1,32}$/).test(p.get(k)))||!/^\d{1,10}(\.\d{1,2})?$/.test(p.get('prc')))throw Error('Fiskalni link sadrži neispravne vrednosti.');
+            return {url:u.href,iic:p.get('iic'),tin:p.get('tin'),date:p.get('crtd')};
+        };
+        const toMinor = value => {
+            if(value===undefined||value===null||value==='')return undefined;
+            const s=String(value).trim().replace(',','.');
+            if(!/^\d{1,10}(\.\d{1,2})?$/.test(s))throw Error('Cena mora biti nenegativan iznos sa najviše dve decimale.');
+            const [whole,dec='']=s.split('.'),n=Number(whole)*100+Number(dec.padEnd(2,'0'));
+            if(!Number.isSafeInteger(n))throw Error('Cena nije ispravna.');return n;
+        };
+        const priceText = minor => Number.isSafeInteger(minor)&&minor>=0 ? (minor/100).toFixed(2) : '';
+        const qrDate = raw => {
+            if(typeof raw!=='string'||!parseDate(raw.slice(0,10))||!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-]\d{2}:?\d{2})$/.test(raw))return '';
+            const normalized=raw.replace(/([+-]\d{2})(\d{2})$/,'$1:$2'),date=new Date(normalized);
+            if(!Number.isFinite(date.getTime()))return '';
+            const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Podgorica',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date);
+            return ['year','month','day'].map(k=>p.find(x=>x.type===k).value).join('-');
+        };
+        const receiptData = (data,link) => {
+            if(!data||typeof data!=='object'||data.iic?.toUpperCase()!==link.iic.toUpperCase()||!Array.isArray(data.items)||data.items.length>500)throw Error('Portal nije vratio prepoznatljiv račun.');
+            const safeText=v=>typeof v==='string'&&v.length<=500?v:'';
+            const money=v=>{try{return typeof v==='number'&&Number.isFinite(v)?toMinor(v):undefined;}catch{return undefined;}};
+            return {url:link.url,store:safeText(data.seller?.name),purchaseDate:qrDate(data.dateTimeCreated),invoiceNumber:safeText(data.invoiceNumber),currency:/^[A-Z]{3}$/.test(data.currency?.code||'')?data.currency.code:'',items:data.items.map(i=>({name:safeText(i.name),quantity:typeof i.quantity==='number'&&i.quantity>0?i.quantity:null,unit:money(i.unitPriceAfterVat),line:money(i.priceAfterVat)}))};
+        };
+        async function readFiscalReceipt(raw,signal,send=window.fetch.bind(window)) {
+            const link=fiscalLink(raw);
+            const response=await send('https://mapr.tax.gov.me/ic/api/verifyInvoice',{method:'POST',mode:'cors',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:new URLSearchParams({iic:link.iic,tin:link.tin,dateTimeCreated:link.date}),signal});
+            if(!response.ok)throw Error('Fiskalni portal trenutno nije dostupan.');
+            return receiptData(await response.json(),link);
+        }
+        const mergeReceipt = (form,proposal) => {
+            const next={...form},kept=[];
+            for(const [key,value]of Object.entries(proposal)){if(value===undefined||value===null||value==='')continue;if(form[key]!==undefined&&form[key]!==null&&String(form[key]).trim()!=='')kept.push(key);else next[key]=value;}
+            return {next,kept};
+        };
+        function ReceiptQR({disabled,isCurrent,onApply}) {
+            const [link,setLink]=useState(''),[receipt,setReceipt]=useState(null),[selected,setSelected]=useState(''),[priceChoice,setPriceChoice]=useState(''),[confirmedEUR,setConfirmedEUR]=useState(false);
+            const [busy,setBusy]=useState(false),[error,setError]=useState(''),[camera,setCamera]=useState(false);
+            const life=useRef({active:true,seq:0,busy:false,scanner:null,controller:null}),file=useRef(null),region=useRef('fiscal-qr-'+crypto.randomUUID());
+            const stop=async scanner=>{if(!scanner)return;try{if(scanner.isScanning)await scanner.stop();}catch{}try{scanner.clear();}catch{}};
+            const cancel=()=>{const l=life.current;l.seq++;l.controller?.abort();const scanner=l.scanner;l.scanner=null;void stop(scanner);l.busy=false;if(l.active){setBusy(false);setCamera(false);setReceipt(null);setError('');}};
+            useEffect(()=>{life.current.active=true;return()=>{life.current.active=false;cancel();};},[]);
+            useEffect(()=>{if(disabled)cancel();},[disabled]);
+            const current=seq=>life.current.active&&life.current.seq===seq&&!disabled&&isCurrent();
+            const lookup=async(raw,seq)=>{
+                if(!current(seq))return;
+                setLink(raw);setReceipt(null);setSelected('');setPriceChoice('');setConfirmedEUR(false);
+                const controller=new AbortController();life.current.controller=controller;
+                const timer=setTimeout(()=>controller.abort(),20000);
+                try{const result=await readFiscalReceipt(raw,controller.signal);if(current(seq)){setReceipt(result);setError('');}}
+                catch(e){if(current(seq))setError('Automatsko preuzimanje nije uspelo. Podatke unesite ručno. Ispravan link možete sačuvati odvojeno.');}
+                finally{clearTimeout(timer);if(current(seq)){life.current.busy=false;setBusy(false);setCamera(false);}}
+            };
+            const begin=()=>{const l=life.current;if(l.busy||disabled||!isCurrent())return null;l.busy=true;setBusy(true);setError('');return ++l.seq;};
+            const paste=()=>{const seq=begin();if(seq===null)return;try{fiscalLink(link);void lookup(link,seq);}catch(e){life.current.busy=false;setBusy(false);setError(e.message);}};
+            const scanFile=async event=>{
+                const image=event.target.files?.[0];event.target.value='';if(!image)return;
+                const seq=begin();if(seq===null)return;let scanner;
+                try{if(!window.Html5Qrcode)throw Error();scanner=new window.Html5Qrcode(region.current,{formatsToSupport:[window.Html5QrcodeSupportedFormats.QR_CODE],useBarCodeDetectorIfSupported:false});life.current.scanner=scanner;
+                    const raw=await scanner.scanFile(image,false);await stop(scanner);if(current(seq)){life.current.scanner=null;await lookup(raw,seq);}
+                }catch(e){await stop(scanner);if(current(seq)){life.current.scanner=null;life.current.busy=false;setBusy(false);setError('QR nije očitan. Izaberite jasniju sliku ili nalepite link.');}}
+            };
+            const scanCamera=async()=>{
+                const seq=begin();if(seq===null)return;setCamera(true);let scanner;
+                try{if(!window.Html5Qrcode)throw Error();scanner=new window.Html5Qrcode(region.current,{formatsToSupport:[window.Html5QrcodeSupportedFormats.QR_CODE],useBarCodeDetectorIfSupported:false});life.current.scanner=scanner;let detected=false;
+                    await scanner.start({facingMode:'environment'},{fps:8,qrbox:{width:220,height:220}},raw=>{if(detected||!current(seq))return;detected=true;void(async()=>{await stop(scanner);if(current(seq)){life.current.scanner=null;setCamera(false);await lookup(raw,seq);}})();},()=>{});
+                    if(!current(seq))await stop(scanner);
+                }catch(e){await stop(scanner);if(current(seq)){life.current.scanner=null;life.current.busy=false;setBusy(false);setCamera(false);setError('Kamera nije dostupna ili dozvola nije data. Učitajte sliku ili nalepite link.');}}
+            };
+            const item=receipt?.items[Number(selected)];
+            const chosenPrice=item?(item.quantity===1?item.line:priceChoice==='unit'?item.unit:priceChoice==='line'?item.line:undefined):undefined;
+            const apply=proposal=>{if(!busy&&!disabled&&isCurrent()){onApply(proposal);cancel();setLink('');}};
+            return <section className="receipt-qr" aria-label="QR fiskalnog računa">
+                <h3 className="font-bold">Dodaj podatke sa fiskalnog računa</h3>
+                <div className="qr-actions"><button type="button" disabled={disabled||busy} onClick={scanCamera} className="catalog-button">Skeniraj QR</button><button type="button" disabled={disabled||busy} onClick={()=>file.current?.click()} className="catalog-button">Učitaj QR sa slike</button></div>
+                <input ref={file} type="file" accept="image/*" onChange={scanFile} disabled={disabled||busy} className="hidden" aria-label="Slika QR koda računa"/>
+                <label className="block">Nalepi link<input type="url" value={link} disabled={disabled||busy} onChange={e=>{setLink(e.target.value);setReceipt(null);setError('');}} className="catalog-control"/></label>
+                <div className="qr-actions"><button type="button" disabled={disabled||busy||!link} onClick={paste} className="catalog-button">Proveri račun</button><button type="button" disabled={disabled||busy||!link} onClick={()=>{try{apply({fiscalReceiptUrl:fiscalLink(link).url});}catch(e){setError(e.message);}}} className="catalog-button">Sačuvaj samo link u formi</button></div>
+                <div id={region.current} className="qr-reader" aria-label="Pregled QR skenera"/>
+                {(busy||camera||receipt||error)&&<button type="button" onClick={cancel} className="catalog-button">Otkaži QR unos</button>}
+                {busy&&<p role="status">{camera?'Usmerite kameru ka QR kodu.':'Čitanje podataka računa...'}</p>}
+                {error&&<p role="alert">{error}</p>}
+                {receipt&&<div className="space-y-3">
+                    <label className="block">Izaberi jedan proizvod<select value={selected} onChange={e=>{setSelected(e.target.value);setPriceChoice('');}} className="catalog-control"><option value="">Izaberi proizvod</option>{receipt.items.map((i,n)=><option key={n} value={String(n)}>{i.name||'Stavka bez naziva'} · količina {i.quantity??'?'} · jedinično {priceText(i.unit)||'?'} · iznos stavke {priceText(i.line)||'?'}</option>)}</select></label>
+                    {selected!==''&&item&&<div className="qr-preview"><p>Proizvod: {item.name||'Unesite ručno'}</p><p>Prodavnica: {receipt.store||'Unesite ručno'}</p><p>Datum: {receipt.purchaseDate||'Unesite ručno'}</p><p>Jedinična cena: {priceText(item.unit)||'Nepoznata'}; iznos stavke: {priceText(item.line)||'Nepoznat'}; količina: {item.quantity??'Nepoznata'}</p>
+                    {item.quantity!==1&&<label className="block">Koju cenu prenosite?<select className="catalog-control" value={priceChoice} onChange={e=>setPriceChoice(e.target.value)}><option value="">Bez cene — ručni unos</option><option value="unit">Jediničnu cenu</option><option value="line">Iznos cele stavke</option></select></label>}
+                    {receipt.currency?<p>Valuta pročitana sa portala: {receipt.currency}</p>:<label className="block"><input type="checkbox" checked={confirmedEUR} onChange={e=>setConfirmedEUR(e.target.checked)}/> Potvrđujem EUR — pretpostavka, valuta nije navedena u odgovoru.</label>}
+                    {!receipt.currency&&!confirmedEUR&&<p>Bez potvrde valute cena i valuta neće biti prenete. Možete ih uneti ručno.</p>}
+                    <p>Predložena cena: {chosenPrice===undefined?'Unesite ručno':priceText(chosenPrice)} {receipt.currency||'EUR (potvrditi)'}</p>
+                    <p>Broj računa: {receipt.invoiceNumber||'Unesite ručno'}</p>
+                    <button type="button" disabled={busy||disabled} className="catalog-button" onClick={()=>apply({name:item.name,store:receipt.store,purchaseDate:receipt.purchaseDate,purchasePrice:chosenPrice!==undefined&&(receipt.currency||confirmedEUR)?priceText(chosenPrice):'',currency:receipt.currency||(confirmedEUR?'EUR':''),invoiceNumber:receipt.invoiceNumber,fiscalReceiptUrl:receipt.url})}>Preuzmi podatke</button>
+                    <p>Popunjena polja ostaju sačuvana. Kategoriju i trajanje garancije birate sami. Fotografija računa se dodaje zasebno.</p></div>}
+                </div>}
+            </section>;
+        }
+
         function AppFooter() {
             return <footer className="app-footer">
                 <p>GarancijePro · Lična evidencija računa i garancija</p>
@@ -675,12 +785,14 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const disposed = useRef(false), discardingRef = useRef(false);
             const [discarding, setDiscarding] = useState(false);
             const [sealed, setSealed] = useState(!!restored.current?.sealed);
-            const [form, setForm] = useState(() => restored.current?.metadata || ({
+            const [form, setForm] = useState(() => ({
                 name: textValue(initial?.name), category: textValue(initial?.category),
-                purchaseDate: initial ? (parseDate(initial.purchaseDate) ? initial.purchaseDate : '') : dateInput(),
+                purchaseDate: initial ? (parseDate(initial.purchaseDate) ? initial.purchaseDate : '') : '',
                 baseMonths: initial ? (monthsValue(initial.baseMonths, 1) ?? '') : 24,
                 extendedMonths: initial ? (monthsValue(initial.extendedMonths ?? 0, 0) ?? '') : 0,
-                store: textValue(initial?.store), description: textValue(initial?.description)
+                store: textValue(initial?.store), description: textValue(initial?.description),
+                purchasePrice: priceText(restored.current?.metadata?.purchasePriceMinor??initial?.purchasePriceMinor),currency:textValue(initial?.currency),invoiceNumber:textValue(initial?.invoiceNumber),fiscalReceiptUrl:textValue(initial?.fiscalReceiptUrl),
+                ...restored.current?.metadata
             }));
             const [attachments, setAttachments] = useState(() => restored.current?.attachments || attachmentRefs(initial));
             const [pending, setPending] = useState(() => restored.current?.pending || []);
@@ -710,6 +822,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 catch(e) { setError(e.message); }
             }, [form,attachments,pending]);
             const change = (field, value) => { if(!sealed && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
+            const [qrNotice,setQrNotice]=useState('');
+            const qrCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
+            const applyQR=proposal=>{if(!qrCurrent())return;const result=mergeReceipt(form,proposal);setForm(result.next);const names={name:'naziv',store:'prodavnica',purchaseDate:'datum',purchasePrice:'cena',currency:'valuta',invoiceNumber:'broj računa',fiscalReceiptUrl:'fiskalni link'};setQrNotice(result.kept.length?'Zadržana popunjena polja: '+result.kept.map(k=>names[k]).join(', ')+'.':'Podaci su preneti u formu. Pregledajte ih i dopunite kategoriju i trajanje. Garancija nije sačuvana.');};
             const expiry = calcExp(form.purchaseDate, form.baseMonths, form.extendedMonths);
 
             const handleFile = async e => {
@@ -754,6 +869,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     setError('Unesite naziv, ispravan datum kupovine koji nije u budućnosti, celo trajanje u mesecima i opis do 150 karaktera.');
                     return;
                 }
+                try { const data=formMetadata(form,initial); if(data.purchasePriceMinor!==undefined&&!/^[A-Z]{3}$/.test(data.currency||''))throw Error('Uz cenu izaberite valutu od tri velika slova, npr. EUR.'); if(data.currency&&!/^[A-Z]{3}$/.test(data.currency))throw Error('Valuta mora imati tri velika slova.'); if(data.invoiceNumber&&data.invoiceNumber.length>200)throw Error('Broj računa je predugačak.'); if(data.fiscalReceiptUrl)fiscalLink(data.fiscalReceiptUrl); } catch(e){setError(e.message);return;}
                 if (malformedAttachments) { setError('Postojeći podaci o prilozima nisu podržani. Čuvanje je zaustavljeno da bi ostali očuvani.'); return; }
                 if (needsService && !service?.saveWarranty) { setError('Servis priloga nije konfigurisan. Nema čuvanja niti slanja priloga. Unos ostaje u formi.'); return; }
                 savingRef.current = true; setSaving(true); setError('');
@@ -801,6 +917,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     {sealed && <p role="status">Nastavak započetog čuvanja: podaci su zaključani dok se ishod ne potvrdi. Nedostajuće originale izaberite ponovo.</p>}
                     {error && <p role="alert" className="text-red-700">{error}</p>}
                     <fieldset disabled={saving || discarding} className="space-y-4">
+                        {!initial&&<ReceiptQR disabled={saving||processing||discarding||sealed} isCurrent={qrCurrent} onApply={applyQR}/>}
+                        {qrNotice&&<p role="status">{qrNotice}</p>}
                         <label className="block">Naziv proizvoda
                             <input type="text" required value={form.name} disabled={sealed} onChange={e => change('name', e.target.value)} className="w-full p-3 border rounded-xl" />
                         </label>
@@ -808,6 +926,12 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         <label className="block">Prodavnica (opciono)
                             <input type="text" value={form.store} disabled={sealed} onChange={e => change('store', e.target.value)} className="w-full p-3 border rounded-xl" />
                         </label>
+                        <div className="grid sm:grid-cols-2 gap-4">
+                            <label className="block">Plaćena cena proizvoda<input type="text" inputMode="decimal" value={form.purchasePrice??''} disabled={sealed} onChange={e=>change('purchasePrice',e.target.value)} className="catalog-control"/></label>
+                            <label className="block">Valuta<input type="text" maxLength={3} value={form.currency??''} disabled={sealed} onChange={e=>change('currency',e.target.value.toUpperCase())} placeholder="EUR" className="catalog-control"/></label>
+                        </div>
+                        <label className="block">Broj fiskalnog računa<input type="text" maxLength={200} value={form.invoiceNumber??''} disabled={sealed} onChange={e=>change('invoiceNumber',e.target.value)} className="catalog-control"/></label>
+                        <label className="block">Izvorni QR link<input type="url" value={form.fiscalReceiptUrl??''} disabled={sealed} onChange={e=>change('fiscalReceiptUrl',e.target.value)} className="catalog-control"/></label>
                         <label className="block">Opis (opciono)
                             <textarea maxLength={150} aria-describedby="description-count" value={form.description} disabled={sealed} onChange={e => change('description', e.target.value)} className="w-full p-3 border rounded-xl" />
                             <span id="description-count" className="text-sm text-slate-500">{form.description.length}/150 karaktera</span>
@@ -891,6 +1015,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         {!exp && <p role="status">Ovaj zapis ima nepotpune ili neispravne podatke. Izmenite ga da biste dobili tačan datum isteka.</p>}
                         {textValue(item.store) && <p><strong>Prodavnica:</strong> {item.store}</p>}
                         {textValue(item.description) && <p className="break-words"><strong>Opis:</strong> {item.description}</p>}
+                        {Number.isSafeInteger(item.purchasePriceMinor)&&item.purchasePriceMinor>=0&&<p>Plaćena cena: {priceText(item.purchasePriceMinor)} {textValue(item.currency)}</p>}
+                        {textValue(item.invoiceNumber)&&<p className="break-all">Broj računa: {item.invoiceNumber}</p>}
+                        {(()=>{try{const link=fiscalLink(item.fiscalReceiptUrl);return <a href={link.url} target="_blank" rel="noopener noreferrer" className="catalog-button inline-block">Otvori fiskalni račun</a>;}catch{return null;}})()}
                         <h3 className="font-bold">Prilozi</h3>
                         <AttachmentList attachments={[...legacyAttachments(item), ...attachmentRefs(item)]} user={user} />
                         {legacyAttachments(item).length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi su već deo učitanog zapisa; nisu migrirani.</p>}
