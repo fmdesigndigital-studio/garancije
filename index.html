@@ -574,7 +574,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.25.3';
+        const RELEASE_VERSION = '2026.10.25.4';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -748,8 +748,25 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         }
 
 
-        const CATEGORY_ICON_NAMES=['refrigerator','cooking-pot','air-vent','tv','laptop','cpu','smartphone','router','wrench','sprout','car','armchair','package'];
-        function CategoryIcon({category}) { return <span className="category-icon"><Icon name={CATEGORY_ICON_NAMES[PRODUCT_CATEGORIES.indexOf(category)]||'package'}/></span>; }
+        const CATEGORY_ICON_ART=[
+            [["rect",{"x":9,"y":5,"width":30,"height":38,"rx":2.4,"fill":"#fff"}],["path",{"d":"M9 13H39"}],["circle",{"cx":14.5,"cy":9.3,"r":1.5,"stroke":"#1261e8"}],["path",{"d":"M29 9.3H34"}],["circle",{"cx":24,"cy":28,"r":10.5}],["circle",{"cx":24,"cy":28,"r":7.8,"stroke":"#1261e8"}],["path",{"d":"M16.5 28Q20.25 24.7 24 28T31.5 28","stroke":"#1261e8"}]], // Veš-mašina
+            [["path",{"d":"M34 10H37Q41 10 40 16L39 20Q38 24 33 24"}],["rect",{"x":19,"y":3,"width":11,"height":3,"rx":1.2,"fill":"#fff"}],["path",{"d":"M16 6H32Q35 6 34 9L31 29H18L14 9Q13 6 16 6Z","fill":"#fff"}],["path",{"d":"M22 11V25M27 11V25","stroke":"#1261e8"}],["path",{"d":"M18 29H31Q33 29 34 33L36 41Q37 44 33 44H15Q12 44 13 41L15 32Q15 29 18 29Z","fill":"#fff"}],["circle",{"cx":24.5,"cy":36.5,"r":2.8,"stroke":"#1261e8"}]], // Blender
+            [["rect",{"x":3,"y":8,"width":42,"height":17,"rx":4,"fill":"#fff"}],["rect",{"x":7,"y":20,"width":34,"height":5,"rx":1.5,"fill":"#fff"}],["path",{"d":"M7 23H41"}],["path",{"d":"M21 13H27","stroke":"#1261e8"}],["path",{"d":"M16 29C12 33 20 36 16 41M24 29C20 33 28 36 24 41M32 29C28 33 36 36 32 41","stroke":"#1261e8"}]], // Klima
+            [["rect",{"x":3,"y":10,"width":42,"height":25,"rx":1.2,"fill":"#fff"}],["path",{"d":"M24 35V41M14 41H34"}],["path",{"d":"M20 17L31 23L20 29Z","stroke":"#1261e8"}]], // Ekran sa play znakom
+            [["rect",{"x":7,"y":10,"width":34,"height":23,"rx":2,"fill":"#fff"}],["path",{"d":"M7 32L3 37Q2 39 5 39H43Q46 39 45 37L41 32Z","fill":"#fff"}],["path",{"d":"M21 36H27","stroke":"#1261e8"}]], // Laptop
+            [["path",{"d":"M18 6V12M24 6V12M30 6V12M18 36V42M24 36V42M30 36V42M6 18H12M6 24H12M6 30H12M36 18H42M36 24H42M36 30H42"}],["rect",{"x":12,"y":12,"width":24,"height":24,"rx":1.8,"fill":"#fff"}],["rect",{"x":18,"y":18,"width":12,"height":12,"stroke":"#1261e8"}]], // Čip
+            [["path",{"d":"M16 10V7Q16 4 19 4H41Q44 4 44 7V39Q44 42 41 42H24","fill":"#fff"}],["rect",{"x":4,"y":14,"width":16,"height":30,"rx":2.5,"fill":"#fff"}],["path",{"d":"M10 38H14","stroke":"#1261e8"}],["circle",{"cx":32,"cy":38,"r":1.5,"fill":"#1261e8","stroke":"none"}]], // Telefon i tablet
+            [["path",{"d":"M8 12V28M40 12V28"}],["rect",{"x":3,"y":28,"width":42,"height":12,"rx":2.5,"fill":"#fff"}],["path",{"d":"M14 10Q24 1 34 10M18 14Q24 9 30 14M21 18Q24 15.5 27 18","stroke":"#1261e8"}],["circle",{"cx":24,"cy":22,"r":1.5,"fill":"#1261e8","stroke":"none"}],["circle",{"cx":8,"cy":34,"r":1.2,"fill":"#1261e8","stroke":"none"}],["circle",{"cx":13,"cy":34,"r":1.2,"fill":"#1261e8","stroke":"none"}],["circle",{"cx":18,"cy":34,"r":1.2,"fill":"#1261e8","stroke":"none"}]], // Ruter
+            [["path",{"d":"M35 5C28 3 22 9 23 17L6 34C1 39 8 47 13 42L30 25C39 27 45 19 42 11L36 18L30 12Z","fill":"#fff"}],["path",{"d":"M15 32L25 22","stroke":"#1261e8"}],["circle",{"cx":9.5,"cy":37.5,"r":2,"stroke":"#1261e8"}]], // Ključ
+            [["path",{"d":"M22 31C11 31 7 25 7 16C17 16 24 21 22 31Z","fill":"#fff","stroke":"#1261e8"}],["path",{"d":"M26 29C23 17 31 9 43 10C43 23 37 30 26 29Z","fill":"#fff","stroke":"#1261e8"}],["path",{"d":"M24 40C24 32 20 28 18 24M24 34C26 27 30 23 34 20M7 44Q24 37 41 44"}]], // Biljka
+            [["path",{"d":"M3 31V26Q3 23 6 23H9L16 17Q19 15 23 15H31Q34 15 37 18L41 22L44 23Q46 24 46 28V32Q46 34 43 34H5Q3 34 3 31Z","fill":"#fff","transform":"translate(2.4 2.4) scale(.9)"}],["path",{"d":"M14 23L19 18H30Q33 18 36 23ZM25 18V23","stroke":"#1261e8","transform":"translate(2.4 2.4) scale(.9)"}],["circle",{"cx":12,"cy":34,"r":4.6,"fill":"#fff","transform":"translate(2.4 2.4) scale(.9)"}],["circle",{"cx":37,"cy":34,"r":4.6,"fill":"#fff","transform":"translate(2.4 2.4) scale(.9)"}],["path",{"d":"M3 28H6M43 28H46","transform":"translate(2.4 2.4) scale(.9)"}]], // Automobil
+            [["rect",{"x":10,"y":6,"width":28,"height":28,"rx":7,"fill":"#fff"}],["path",{"d":"M9 38V43H12L13 38M35 38L36 43H39V38","fill":"#fff"}],["path",{"d":"M10 20Q5 20 5 25V34Q5 38 10 38H38Q43 38 43 34V25Q43 20 38 20Q34 20 34 25V30H14V25Q14 20 10 20Z","fill":"#fff"}],["rect",{"x":13,"y":29,"width":22,"height":5,"rx":1.2,"fill":"#fff","stroke":"#1261e8"}]], // Fotelja
+            [["rect",{"x":10,"y":10,"width":11,"height":11,"rx":1.8,"fill":"#fff"}],["rect",{"x":27,"y":10,"width":11,"height":11,"rx":1.8,"fill":"#dbeafe","stroke":"#1261e8"}],["rect",{"x":10,"y":27,"width":11,"height":11,"rx":1.8,"fill":"#fff"}],["rect",{"x":27,"y":27,"width":11,"height":11,"rx":1.8,"fill":"#fff"}]] // Četiri kvadrata
+        ];
+        function CategoryIcon({category}) {
+            const shapes=CATEGORY_ICON_ART[PRODUCT_CATEGORIES.indexOf(category)]||CATEGORY_ICON_ART[12];
+            return <span className="category-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" stroke="#14345f" style={{strokeWidth:2.4}} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{shapes.map(([tag,attrs],key)=>React.createElement(tag,{...attrs,key}))}</svg></span>;
+        }
         function StatusPill({days}) {return <span className={'status '+(days===null?'unknown':days<0?'expired':days<=30?'soon':'')}>{days!==null&&days>30&&<Icon name="check"/>}{getStyle(days).l}</span>;}
 
         function AppFooter() {
