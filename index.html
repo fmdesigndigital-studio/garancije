@@ -119,13 +119,13 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         }
 
         body.gp-ui dialog.document-editor { box-sizing:border-box; width:min(60rem,98vw); height:min(56rem,96dvh); max-width:none; max-height:96dvh; overflow:auto; border:1px solid #cbd5e1; border-radius:1rem; color:#0f172a; }
-        body.gp-ui dialog.document-editor { padding:.75rem; }
-        .document-editor[open] { display:flex; flex-direction:column; gap:.5rem; }
+        body.gp-ui dialog.document-editor { padding:.4rem; }
+        .document-editor[open] { display:flex; flex-direction:column; gap:.25rem; }
         .document-editor h2 { margin:0; font-size:1.2rem; font-weight:700; }
         .document-editor p { margin:0; line-height:1.35; overflow-wrap:anywhere; }
         .document-editor .document-instruction { font-size:.95rem; }
         .document-editor .document-status { font-size:.9rem; }
-        .document-stage { box-sizing:border-box; flex:1 1 auto; min-height:140px; position:relative; display:flex; align-items:center; justify-content:center; padding:24px; overflow:hidden; background:#e2e8f0; border-radius:.5rem; }
+        .document-stage { box-sizing:border-box; flex:1 1 auto; min-height:140px; position:relative; display:flex; align-items:center; justify-content:center; padding:22px; overflow:hidden; background:#e2e8f0; border-radius:.5rem; }
         .document-sheet { position:relative; flex:none; line-height:0; }
         .document-sheet canvas { display:block; width:100%; height:auto; }
         .document-sheet svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
@@ -135,17 +135,19 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         .document-editor .document-actions button { flex:1 1 auto; min-height:44px; border:1px solid #94a3b8; border-radius:.5rem; padding:.45rem .6rem; line-height:1.2; }
         .document-editor button:focus-visible,.document-editor summary:focus-visible { outline:3px solid #2563eb; outline-offset:2px; }
         .document-editor button:disabled { opacity:.5; }
-        .document-editor details { font-size:.85rem; flex:none; }
-        .document-editor summary { cursor:pointer; min-height:28px; }
-        .document-editor details[open] { max-height:25dvh; overflow:auto; }
-        .document-editor details p + p { margin-top:.5rem; }
+        .document-toolbar { display:flex; align-items:center; gap:.25rem; flex:none; }
+        .document-toolbar h2 { flex:1; font-size:1rem; min-width:0; }
+        .document-editor .document-toolbar button { min-height:44px; min-width:44px; padding:.3rem .5rem; line-height:1.2; font-size:.9rem; }
+        .document-info { position:absolute; inset:0; z-index:2; overflow:auto; padding:.75rem; background:#fff; line-height:1.4; }
+        .document-info[hidden] { display:none; }
+        .document-info p { margin:.75rem 0; font-size:.9rem; }
         .document-result { position:absolute; inset:0; padding:8px; overflow:auto; display:flex; align-items:center; justify-content:center; }
         .document-result img { display:block; width:100%; height:100%; object-fit:contain; }
         .document-result.document-zoom { display:block; }
         .document-result.document-zoom img { width:auto; height:auto; max-width:none; margin:0; }
         .document-editor .document-result-info { font-size:.85rem; }
         @media (max-width:639px) {
-            body.gp-ui dialog.document-editor { width:100%; max-width:100%; height:100dvh; max-height:100dvh; margin:0; border:0; border-radius:0; padding:.6rem; }
+            body.gp-ui dialog.document-editor { width:100%; max-width:100%; height:100dvh; max-height:100dvh; margin:0; border:0; border-radius:0; padding:.35rem; }
             .document-editor .document-actions button { font-size:.9rem; }
         }
     </style>
@@ -802,10 +804,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         })();
 
         function DocumentEditor({file,onConfirm,onCancel}) {
-            const dialog=useRef(null),alive=useRef(true),controller=useRef(null),sourceRef=useRef(null),resultUrl=useRef(null),busyRef=useRef(false),acceptingRef=useRef(false),displayRef=useRef(null),stageRef=useRef(null),previewBackRef=useRef(null),previewButtonRef=useRef(null),viewRef=useRef(false);
+            const dialog=useRef(null),alive=useRef(true),controller=useRef(null),sourceRef=useRef(null),resultUrl=useRef(null),busyRef=useRef(false),acceptingRef=useRef(false),displayRef=useRef(null),stageRef=useRef(null),previewBackRef=useRef(null),previewButtonRef=useRef(null),viewRef=useRef(false),infoButtonRef=useRef(null),infoCloseRef=useRef(null),infoViewRef=useRef(false);
             const [source,setSource]=useState(null),[points,setPoints]=useState([{x:.02,y:.02},{x:.98,y:.02},{x:.98,y:.98},{x:.02,y:.98}]),[turns,setTurns]=useState(0);
             const [result,setResult]=useState(null),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[error,setError]=useState(''),[zoom,setZoom]=useState(false);
-            const [status,setStatus]=useState('Pripremam fotografiju…'),[showPreview,setShowPreview]=useState(false),[stageSize,setStageSize]=useState({width:0,height:0});
+            const [status,setStatus]=useState('Pripremam fotografiju…'),[showPreview,setShowPreview]=useState(false),[showInfo,setShowInfo]=useState(false),[stageSize,setStageSize]=useState({width:0,height:0});
             const clearResult=()=>{if(resultUrl.current)URL.revokeObjectURL(resultUrl.current);resultUrl.current=null;setResult(null);setZoom(false);setShowPreview(false);};
             useEffect(()=>{
                 alive.current=true;const ac=new AbortController();controller.current=ac;
@@ -818,7 +820,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             useEffect(()=>{const node=displayRef.current;if(node&&source){const k=Math.min(1,600/source.canvas.width);node.width=Math.max(2,Math.round(source.canvas.width*k));node.height=Math.max(2,Math.round(source.canvas.height*k));node.getContext('2d').drawImage(source.canvas,0,0,node.width,node.height);}},[source]);
             useEffect(()=>{const node=stageRef.current;if(!node)return;const observer=new ResizeObserver(()=>{const r=node.getBoundingClientRect();setStageSize(old=>old.width===r.width&&old.height===r.height?old:{width:r.width,height:r.height});});observer.observe(node);return()=>observer.disconnect();},[]);
             useEffect(()=>{if(showPreview)previewBackRef.current?.focus();else if(viewRef.current)previewButtonRef.current?.focus();viewRef.current=showPreview;},[showPreview]);
-            const sheetWidth=source?Math.max(1,Math.min(Math.max(1,stageSize.width-48),Math.max(1,stageSize.height-48)*source.canvas.width/source.canvas.height)):0;
+            useEffect(()=>{if(showInfo)infoCloseRef.current?.focus();else if(infoViewRef.current)infoButtonRef.current?.focus();infoViewRef.current=showInfo;},[showInfo]);
+            const sheetWidth=source?Math.max(1,Math.min(Math.max(1,stageSize.width-44),Math.max(1,stageSize.height-44)*source.canvas.width/source.canvas.height)):0;
             const move=(index,x,y)=>{if(busyRef.current||loading)return;clearResult();setError('');setPoints(old=>old.map((p,i)=>i===index?{x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y))}:p));};
             const pointer=(e,index)=>{if(!e.currentTarget.hasPointerCapture(e.pointerId))return;const r=e.currentTarget.parentElement.getBoundingClientRect();move(index,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height);};
             const rotate=()=>{if(busyRef.current||loading)return;clearResult();setTurns(t=>(t+1)%4);};
@@ -837,29 +840,39 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
             const cancel=()=>{if(acceptingRef.current)return;controller.current?.abort();onCancel();};
             const size=value=>value<1048576?(value/1024).toFixed(0)+' KB':(value/1048576).toFixed(1)+' MB';
-            return <dialog ref={dialog} className="document-editor" aria-labelledby="document-title" onCancel={e=>{e.preventDefault();cancel();}}>
-                <header><h2 id="document-title">Iseci dokument</h2><p className="document-instruction">{showPreview?'Proveri čitljivost pre potvrde.':'Pomeri krstiće na uglove dokumenta.'}</p></header>
+            return <dialog ref={dialog} className="document-editor" aria-labelledby="document-title" onCancel={e=>{e.preventDefault();if(showInfo)setShowInfo(false);else cancel();}}>
+                <header className="document-toolbar">
+                    {showPreview&&<button ref={previewBackRef} type="button" aria-label="Nazad na sečenje" disabled={busy} onClick={()=>{setShowPreview(false);setZoom(false);setStatus('');}}>←</button>}
+                    <h2 id="document-title">{showPreview?'Pregled':'Iseci'}</h2>
+                    {showPreview?<button type="button" disabled={busy} onClick={()=>setZoom(v=>!v)}>{zoom?'Uklopi':'Uvećaj'}</button>:<button type="button" aria-label="Rotiraj 90°" title={'Rotacija izlaza: '+turns*90+'°'} disabled={!source||busy||loading} onClick={rotate}>↻ 90°</button>}
+                    <button ref={infoButtonRef} type="button" aria-label="Uputstva i detalji" aria-expanded={showInfo} aria-controls="document-info" onClick={()=>setShowInfo(v=>!v)}>ⓘ</button>
+                </header>
                 {status&&<p className="document-status" role="status" aria-live="polite">{status}</p>}
-                <div className="document-actions">
-                    {showPreview?<><button ref={previewBackRef} type="button" disabled={busy} onClick={()=>{setShowPreview(false);setZoom(false);setStatus('');}}>Nazad na sečenje</button><button type="button" disabled={busy} onClick={()=>setZoom(v=>!v)}>{zoom?'Uklopi pregled':'Uvećaj'}</button></>:<><button type="button" disabled={!source||busy||loading} onClick={rotate}>Rotiraj 90°{turns?' · '+turns*90+'°':''}</button><button type="button" disabled={!source||busy||loading} ref={previewButtonRef} onClick={preview}>Pregledaj</button></>}
-                </div>
                 <div className="document-stage" ref={stageRef} aria-busy={busy||loading}>
-                    {source&&<div className="document-sheet" style={{width:sheetWidth,display:showPreview?'none':undefined}}>
+                    {source&&<div className="document-sheet" style={{width:sheetWidth,display:showPreview?'none':undefined}} inert={showInfo?'':undefined}>
                         <canvas aria-label="Fotografija sa četiri ugla" ref={displayRef}/>
                         <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true"><polygon points={points.map(p=>p.x*1000+','+p.y*1000).join(' ')} fill="rgba(250,204,21,.08)" stroke="#fde047" strokeWidth="2" vectorEffect="non-scaling-stroke"/></svg>
                         {points.map((p,i)=><button key={i} type="button" className="document-corner" style={{left:p.x*100+'%',top:p.y*100+'%'}} aria-label={['Gornji levi ugao','Gornji desni ugao','Donji desni ugao','Donji levi ugao'][i]} aria-describedby="document-keyboard" disabled={busy||loading} onPointerDown={e=>{if(!busyRef.current){e.preventDefault();e.currentTarget.focus();e.currentTarget.setPointerCapture(e.pointerId);}}} onPointerMove={e=>pointer(e,i)} onPointerUp={e=>{if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);}} onKeyDown={e=>{const d=e.shiftKey ? .02 : .005;if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();move(i,p.x+(e.key==='ArrowRight'?d:e.key==='ArrowLeft'?-d:0),p.y+(e.key==='ArrowDown'?d:e.key==='ArrowUp'?-d:0));}}}><svg viewBox="0 0 26 26" aria-hidden="true"><path d="M13 2v22M2 13h22" fill="none" stroke="#0f172a" strokeWidth="6" strokeLinecap="round"/><path d="M13 2v22M2 13h22" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/></svg></button>)}
                     </div>}
-                    {showPreview&&result&&<div className={'document-result'+(zoom?' document-zoom':'')} tabIndex="0" aria-label="Pregled obrađenog dokumenta"><img src={result.url} alt="Obrađeni dokument — proveri čitljivost teksta" style={zoom?{width:result.width}:undefined}/></div>}
+                    {showPreview&&result&&<div className={'document-result'+(zoom?' document-zoom':'')} tabIndex="0" inert={showInfo?'':undefined} aria-label="Pregled obrađenog dokumenta"><img src={result.url} alt="Obrađeni dokument — proveri čitljivost teksta" style={zoom?{width:result.width}:undefined}/></div>}
+                    <section id="document-info" className="document-info" aria-label="Uputstva i detalji" hidden={!showInfo}>
+                        <div className="document-actions"><button ref={infoCloseRef} type="button" onClick={()=>setShowInfo(false)}>Zatvori informacije</button></div>
+                        <p id="document-keyboard">Pomeri krstiće na uglove dokumenta. Strelice pomeraju izabrani ugao; Shift ubrzava pomeranje.</p>
+                        <p>Original: {size(file.size)}{source&&' · '+source.width+' × '+source.height+' px'}. Rotacija izlaza: {turns*90}°.</p>
+                        {source?.reduced&&<p>Radna slika je umanjena. Proveri sitan tekst; original je dostupan.</p>}
+                        <p>Priprema koristi ograničenu radnu sliku, ali pregledač ne garantuje memorijski plafon.</p>
+                        <p>Do potvrde fotografija nije prilog nacrta. Posle osvežavanja pre potvrde izaberi je ponovo. Potvrđena slika čuva se lokalno u ovom pregledaču do završetka čuvanja ili odbacivanja nacrta. Odjava ne briše lokalne fotografije. Brisanje podataka sajta može ukloniti slike nedovršenog nacrta.</p>
+                        <div className="document-actions"><button type="button" disabled={busy||loading} onClick={()=>accept(file)}>Zadrži original</button></div>
+                    </section>
                 </div>
                 {showPreview&&result&&<p className="document-result-info">{size(result.file.size)} · {result.width} × {result.height} px{result.file.size>=file.size?' · Fajl nije manji od originala.':''}</p>}
-                {source?.reduced&&<p className="document-status">Radna slika je umanjena. Proveri sitan tekst; original je dostupan.</p>}
                 {error&&<p role="alert" className="error">{error}</p>}
-                <details><summary>Detalji</summary>
-                    <p id="document-keyboard">Uglovi redom: gore levo, gore desno, dole desno, dole levo. Strelice pomeraju izabrani ugao; Shift ubrzava pomeranje.</p>
-                    <p>Original: {size(file.size)}{source&&' · '+source.width+' × '+source.height+' px'}. Rotacija izlaza: {turns*90}°. Priprema koristi ograničenu radnu sliku, ali pregledač ne garantuje memorijski plafon.</p>
-                    <p>Do potvrde fotografija nije prilog nacrta. Posle osvežavanja pre potvrde izaberi je ponovo. Potvrđena slika čuva se lokalno u ovom pregledaču do završetka čuvanja ili odbacivanja nacrta. Odjava ne briše lokalne fotografije. Brisanje podataka sajta može ukloniti slike nedovršenog nacrta.</p>
-                </details>
-                <div className="document-actions"><button type="button" disabled={!result||busy} className="primary" onClick={()=>accept(result.file)}>Koristi obrađenu</button><button type="button" disabled={busy||loading} onClick={()=>accept(file)}>Zadrži original</button><button type="button" disabled={busy&&status.startsWith('Čuvam')} onClick={cancel}>{busy?'Prekini obradu':'Otkaži'}</button></div>
+                <div className="document-actions">
+                    {showPreview&&<button type="button" disabled={!result||busy} className="primary" onClick={()=>accept(result.file)}>Koristi obrađenu</button>}
+                    {(showPreview||error)&&<button type="button" disabled={busy||loading} onClick={()=>accept(file)}>Zadrži original</button>}
+                    <button type="button" disabled={busy&&status.startsWith('Čuvam')} onClick={cancel}>{busy?'Prekini obradu':'Otkaži'}</button>
+                    {!showPreview&&<button type="button" disabled={!source||busy||loading} ref={previewButtonRef} onClick={preview}>Pregledaj</button>}
+                </div>
             </dialog>;
         }
 
@@ -989,7 +1002,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.26.6';
+        const RELEASE_VERSION = '2026.10.26.7';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
