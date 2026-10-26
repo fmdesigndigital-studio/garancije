@@ -829,11 +829,11 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const cornerEnd=e=>{e.stopPropagation();if(cornerGesture.current?.id===e.pointerId)cornerGesture.current=null;photoGesture.current=null;if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);};
             const photoDown=e=>{photoGesture.current=null;if(busyRef.current||loading||showInfo||showPreview||selectedCorner===null||!e.isPrimary||e.button!==0)return;photoGesture.current={id:e.pointerId,x:e.clientX,y:e.clientY,moved:false};};
             const place=e=>{const g=photoGesture.current;photoGesture.current=null;if(!g||g.id!==e.pointerId||g.moved||Math.hypot(e.clientX-g.x,e.clientY-g.y)>8||busyRef.current||loading||showInfo||showPreview||selectedCorner===null||!source)return;const r=e.currentTarget.getBoundingClientRect(),x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||x>1||y<0||y>1)return;const next=points.map((p,i)=>i===selectedCorner?{x,y}:p);try{documentImage.geometry(next,source.canvas.width,source.canvas.height);}catch(error){setError(error.message);return;}move(selectedCorner,x,y);};
-            const rotate=()=>{if(busyRef.current||loading)return;clearResult();setTurns(t=>(t+1)%4);};
-            const preview=async()=>{
+            const rotate=()=>{if(busyRef.current||loading||!result)return;preview((turns+1)%4);};
+            const preview=async(nextTurns=turns)=>{
                 if(busyRef.current||!source)return;
                 busyRef.current=true;setBusy(true);setError('');setStatus('Ispravljam dokument…');const ac=new AbortController();controller.current=ac;
-                try{const value=await documentImage.render(source.canvas,points,turns,ac.signal);if(!alive.current||ac.signal.aborted)return;clearResult();resultUrl.current=URL.createObjectURL(value.file);setResult({...value,url:resultUrl.current});setShowPreview(true);setStatus('Pregledajte sitan tekst pre potvrde.');}
+                try{const value=await documentImage.render(source.canvas,points,nextTurns,ac.signal);if(!alive.current||ac.signal.aborted)return;clearResult();resultUrl.current=URL.createObjectURL(value.file);setResult({...value,url:resultUrl.current});setTurns(nextTurns);setShowPreview(true);setStatus('Pregledajte sitan tekst pre potvrde.');}
                 catch(e){if(alive.current&&e.name!=='AbortError'){setError(e.message);setStatus('Podesite uglove ili zadržite original.');}}
                 finally{busyRef.current=false;if(alive.current)setBusy(false);}
             };
@@ -849,7 +849,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <header className="document-toolbar">
                     {showPreview&&<button ref={previewBackRef} type="button" aria-label="Nazad na sečenje" disabled={busy} onClick={()=>{setShowPreview(false);setZoom(false);setStatus('');}}>←</button>}
                     <h2 id="document-title">{showPreview?'Pregled':'Iseci'}</h2>
-                    {showPreview?<button type="button" disabled={busy} onClick={()=>setZoom(v=>!v)}>{zoom?'Uklopi':'Uvećaj'}</button>:<button type="button" aria-label="Rotiraj 90°" title={'Rotacija izlaza: '+turns*90+'°'} disabled={!source||busy||loading} onClick={rotate}>↻ 90°</button>}
+                    {showPreview&&<><button type="button" aria-label="Rotiraj 90°" title={'Rotacija izlaza: '+turns*90+'°'} disabled={busy} onClick={rotate}>↻ 90°</button><button type="button" disabled={busy} onClick={()=>setZoom(v=>!v)}>{zoom?'Uklopi':'Uvećaj'}</button></>}
                     <button ref={infoButtonRef} type="button" aria-label="Uputstva i detalji" aria-expanded={showInfo} aria-controls="document-info" onClick={()=>setShowInfo(v=>!v)}>ⓘ</button>
                 </header>
                 {status&&<p className="document-status" role="status" aria-live="polite">{status}</p>}
@@ -857,7 +857,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     {source&&<div className="document-sheet" style={{width:sheetWidth,display:showPreview?'none':undefined}} inert={showInfo?'':undefined} onPointerDown={photoDown} onPointerMove={e=>{const g=photoGesture.current;if(g&&g.id===e.pointerId&&Math.hypot(e.clientX-g.x,e.clientY-g.y)>8)g.moved=true;}} onPointerUp={place} onPointerCancel={()=>{photoGesture.current=null;}}>
                         <canvas aria-label="Fotografija sa četiri ugla" ref={displayRef}/>
                         <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true"><polygon points={points.map(p=>p.x*1000+','+p.y*1000).join(' ')} fill="rgba(250,204,21,.08)" stroke="#fde047" strokeWidth="2" vectorEffect="non-scaling-stroke"/></svg>
-                        {points.map((p,i)=><button key={i} type="button" className="document-corner" style={{left:p.x*100+'%',top:p.y*100+'%'}} aria-label={['Gornji levi ugao','Gornji desni ugao','Donji desni ugao','Donji levi ugao'][i]} aria-describedby="document-keyboard" aria-pressed={selectedCorner===i} disabled={busy||loading} onFocus={()=>setSelectedCorner(i)} onPointerDown={e=>cornerDown(e,i)} onPointerMove={e=>pointer(e,i)} onPointerUp={cornerEnd} onPointerCancel={cornerEnd} onLostPointerCapture={e=>{if(cornerGesture.current?.id===e.pointerId)cornerGesture.current=null;}} onClick={e=>{e.stopPropagation();setSelectedCorner(i);}} onKeyDown={e=>{const d=e.shiftKey ? .02 : .005;if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();move(i,p.x+(e.key==='ArrowRight'?d:e.key==='ArrowLeft'?-d:0),p.y+(e.key==='ArrowDown'?d:e.key==='ArrowUp'?-d:0));}}}><svg viewBox="0 0 26 26" aria-hidden="true"><path d="M13 2v22M2 13h22" fill="none" stroke="#0f172a" strokeWidth="6" strokeLinecap="round"/><path d="M13 2v22M2 13h22" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/></svg></button>)}
+                        {points.map((p,i)=><button key={i} type="button" className="document-corner" style={{left:p.x*100+'%',top:p.y*100+'%'}} aria-label={['Gornji levi ugao','Gornji desni ugao','Donji desni ugao','Donji levi ugao'][i]} aria-describedby="document-keyboard" aria-pressed={selectedCorner===i} disabled={busy||loading} onFocus={()=>setSelectedCorner(i)} onPointerDown={e=>cornerDown(e,i)} onPointerMove={e=>pointer(e,i)} onPointerUp={cornerEnd} onPointerCancel={cornerEnd} onLostPointerCapture={e=>{if(cornerGesture.current?.id===e.pointerId)cornerGesture.current=null;}} onClick={e=>{e.stopPropagation();setSelectedCorner(i);}} onKeyDown={e=>{const d=e.shiftKey ? .02 : .005;if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();move(i,p.x+(e.key==='ArrowRight'?d:e.key==='ArrowLeft'?-d:0),p.y+(e.key==='ArrowDown'?d:e.key==='ArrowUp'?-d:0));}}}><svg viewBox="0 0 26 26" aria-hidden="true"><path d="M13 2v22M2 13h22" fill="none" stroke="#0f172a" strokeWidth="4" strokeLinecap="round"/><path d="M13 2v22M2 13h22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg></button>)}
                     </div>}
                     {showPreview&&result&&<div className={'document-result'+(zoom?' document-zoom':'')} tabIndex="0" inert={showInfo?'':undefined} aria-label="Pregled obrađenog dokumenta"><img src={result.url} alt="Obrađeni dokument — proveri čitljivost teksta" style={zoom?{width:result.width}:undefined}/></div>}
                     <section id="document-info" className="document-info" aria-label="Uputstva i detalji" hidden={!showInfo}>
@@ -876,7 +876,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     {showPreview&&<button type="button" disabled={!result||busy} className="primary" onClick={()=>accept(result.file)}>Koristi obrađenu</button>}
                     {(showPreview||error)&&<button type="button" disabled={busy||loading} onClick={()=>accept(file)}>Zadrži original</button>}
                     <button type="button" disabled={busy&&status.startsWith('Čuvam')} onClick={cancel}>{busy?'Prekini obradu':'Otkaži'}</button>
-                    {!showPreview&&<button type="button" disabled={!source||busy||loading} ref={previewButtonRef} onClick={preview}>Pregledaj</button>}
+                    {!showPreview&&<button type="button" disabled={!source||busy||loading} ref={previewButtonRef} onClick={()=>preview()}>Pregledaj</button>}
                 </div>
             </dialog>;
         }
@@ -1007,7 +1007,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.26.8';
+        const RELEASE_VERSION = '2026.10.26.9';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
