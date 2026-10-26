@@ -117,6 +117,22 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
             /* Tall receipts flow over page boundaries once, without a fixed element repeating. */
             .attachment-print-image.is-long { width: 100%; max-height: none; break-inside: auto; }
         }
+
+        .document-editor { width:min(52rem,calc(100vw - 1rem)); max-height:92dvh; overflow:auto; padding:1rem; border:1px solid #cbd5e1; border-radius:1rem; color:#0f172a; }
+        .document-editor h2 { font-size:1.3rem; font-weight:700; }
+        .document-editor p { margin:.65rem 0; line-height:1.5; }
+        .document-stage { max-height:55dvh; overflow:auto; padding:24px; background:#e2e8f0; border-radius:.75rem; }
+        .document-sheet { position:relative; width:100%; line-height:0; }
+        .document-sheet canvas { display:block; width:100%; height:auto; }
+        .document-sheet svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+        body.gp-ui .document-editor .document-corner { position:absolute; transform:translate(-50%,-50%); width:44px; height:44px; min-height:44px; padding:0; border:3px solid white; border-radius:50%; background:#1d4ed8; color:white; font-weight:700; line-height:1; touch-action:none; box-shadow:0 0 0 1px #1d4ed8; }
+        .document-actions { display:flex; flex-wrap:wrap; gap:.6rem; margin:.8rem 0; }
+        .document-actions button,.document-result + button,.document-editor section>button { min-height:44px; border:1px solid #94a3b8; border-radius:.65rem; padding:.6rem .8rem; }
+        .document-editor button:focus-visible { outline:3px solid #2563eb; outline-offset:3px; }
+        .document-editor button:disabled { opacity:.5; }
+        .document-result { overflow:auto; max-height:60dvh; margin:.5rem 0; background:#e2e8f0; }
+        .document-result img { display:block; height:auto; margin:auto; }
+        .document-zoom img { margin:0; }
     </style>
 </head>
 <body class="gp-ui">
@@ -230,6 +246,43 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         return {extension,base,validateBase,full,validate,prepare,validatePending,reselect};
     })();
     window.attachmentNames = attachmentNames;
+
+    // Only confirmed camera photographs use this cache. Tokens and old drafts are not stored here.
+    function createDocumentPhotoStore(provider) {
+        const database = () => new Promise((resolve, reject) => {
+            let request, blocked=false;
+            try { request = provider().open('garancije-document-photos-v1', 1); }
+            catch { reject(Error('Lokalno čuvanje fotografije nije dostupno. Prilog nije dodat.')); return; }
+            request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains('photos')) request.result.createObjectStore('photos'); };
+            request.onerror = () => reject(Error('Lokalno čuvanje fotografije nije dostupno. Prilog nije dodat.'));
+            request.onblocked = () => { blocked=true;reject(Error('Zatvorite drugu karticu koja blokira lokalno čuvanje i pokušajte ponovo.')); };
+            request.onsuccess = () => { if(blocked){request.result.close();return;}request.result.onversionchange=()=>request.result.close();resolve(request.result); };
+        });
+        const key = (uid, operation, id) => JSON.stringify([uid, operation, id]);
+        const run = async (mode, action) => {
+            const db = await database();
+            return new Promise((resolve, reject) => {
+                let value, transaction;
+                try {
+                    transaction = db.transaction('photos', mode);
+                    action(transaction.objectStore('photos'), result => { value = result; });
+                } catch (error) { transaction?.abort();db.close();reject(error);return; }
+                transaction.oncomplete = () => { db.close();resolve(value); };
+                transaction.onabort = transaction.onerror = () => { db.close();reject(Error('Lokalno skladište fotografija nije završilo operaciju. Proverite slobodan prostor i pokušajte ponovo; nacrt nije potvrđen kao završen.')); };
+            });
+        };
+        return {
+            put: (uid, operation, a) => run('readwrite', store => store.put({blob:a.original,sha256:a.sha256,size:a.size,mime:a.mime}, key(uid,operation,a.id))),
+            get: (uid, operation, id) => run('readonly', (store, result) => { const request=store.get(key(uid,operation,id));request.onsuccess=()=>result(request.result); }),
+            remove: (uid, operation, ids) => run('readwrite', store => { for(const id of ids)store.delete(key(uid,operation,id)); }),
+            removeOperation: (uid, operation) => run('readwrite', store => {
+                const prefix=JSON.stringify([uid,operation]).slice(0,-1)+',';
+                const cursor=store.openKeyCursor(IDBKeyRange.bound(prefix,prefix+'\uffff'));
+                cursor.onsuccess=()=>{const row=cursor.result;if(row){store.delete(row.primaryKey);row.continue();}};
+            })
+        };
+    }
+
     function createDriveService(options = {}) {
         const send = options.fetch || window.fetch.bind(window), authorize = options.authorize || googleAuthorize;
         const storage = options.storage || window.localStorage, now = options.now || Date.now;
@@ -238,6 +291,39 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         const sessionStore = () => { try { return options.simulated ? null : typeof options.sessionStorage === 'function' ? options.sessionStorage() : options.sessionStorage || null; } catch { return null; } };
         const forgetSession = () => { try { sessionStore()?.removeItem(sessionKey); } catch {} };
         const rememberSession = () => { try { sessionStore()?.setItem(sessionKey, JSON.stringify({version:1,accessToken:token,expiresAt:deadline,uid:sessionUid,account,scope:SCOPE})); } catch {} };
+        const photoStore = options.photoStore || (!options.simulated ? createDocumentPhotoStore(() => window.indexedDB) : null);
+        const pendingMetadata = pending => pending.map(({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto})=>({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated,...(documentPhoto===true?{documentPhoto:true}:{})}));
+        const photoOperationKey = (uid,operationId) => JSON.stringify([uid,operationId]);
+        const hasPhotos = (uid,draft) => draft.pending.some(a=>a.documentPhoto===true) || !!journal().documentPhotoOps?.[photoOperationKey(uid,draft.operationId)];
+        const registerPhotoOperation = (uid,operationId) => mutateJournal(j=>{
+            j.documentPhotoOps={...j.documentPhotoOps,[photoOperationKey(uid,operationId)]:{uid,operationId}};
+        }); // Intent only, before bytes; pending attachment metadata is still staged after the Blob commit.
+        const queuePhotoCleanup = (j,uid,draft,reason) => {
+            const key=photoOperationKey(uid,draft.operationId);
+            if(draft.pending.some(a=>a.documentPhoto===true)||j.documentPhotoOps?.[key])
+                j.documentPhotoCleanups={...j.documentPhotoCleanups,[key]:{uid,operationId:draft.operationId,reason}};
+        };
+        const finishPhotoCleanup = async (uid,operationId) => {
+            assertUser(uid);
+            const key=photoOperationKey(uid,operationId),intent=journal().documentPhotoCleanups?.[key],d=journal().draft;
+            if(!intent||intent.uid!==uid||intent.operationId!==operationId||!['saved','discard'].includes(intent.reason))throw Error('Nema potvrđene namere za čišćenje ove operacije.');
+            if(d?.operationId===operationId && (intent.reason!=='saved'||!d.sealed))throw Error('Aktivan nacrt nije odobren za čišćenje.');
+            if(!photoStore?.removeOperation)throw Error('Lokalno čišćenje fotografija nije dostupno. Namera je sačuvana za ponovni pokušaj.');
+            await photoStore.removeOperation(uid,operationId);
+            assertUser(uid);
+            mutateJournal(j=>{
+                const current=j.documentPhotoCleanups?.[key];
+                if(!current||canonical(current)!==canonical(intent))throw Error('Namera čišćenja se promenila.');
+                delete j.documentPhotoCleanups[key];if(j.documentPhotoOps)delete j.documentPhotoOps[key];
+                if(intent.reason==='saved'&&j.draft?.operationId===operationId&&j.draft.sealed)j.draft=null;
+            });
+            notify();return {saved:intent.reason==='saved'};
+        };
+        const cleanPhotos = async (uid,draft) => {
+            if(!hasPhotos(uid,draft))return;
+            mutateJournal(j=>queuePhotoCleanup(j,uid,draft,'saved'));notify();
+            await finishPhotoCleanup(uid,draft.operationId);
+        };
         const getUser = options.getUser || (() => window.firebaseDeps?.auth?.currentUser);
         let token = null, deadline = 0, account = null, sessionUid = null, state = 'disconnected', message = '', generation = 0, timer, connecting = null, authReady = false, authUid = null, authEmail = null;
         const listeners = new Set();
@@ -342,6 +428,23 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 throw new Error(error.message + ' Ishod može biti neizvestan; ponovni pokušaj proverava isti Drive ID. Nema automatskog brisanja.');
             }
         };
+        // Called only while the existing journal WebLock is held.
+        const writeDraft = ({userId,id,base,metadata,attachments,pending,operationId,expectedPending,isCurrent,onStaged,seal=false,allowSealed=false}) => {
+            assertUser(userId);
+            if(isCurrent&&!isCurrent())throw new DOMException('Zastareli upis nacrta je otkazan.','AbortError');
+            const expected=typeof expectedPending==='function'?expectedPending():expectedPending;
+            let draft;
+            mutateJournal(j=>{
+                if(operationId&&(j.discardedDrafts?.[operationId]||(j.draft&&j.draft.operationId!==operationId)))throw Error('Ovaj nacrt više nije aktivan. Nema automatskog obnavljanja.');
+                if(j.draft&&j.draft.id!==id&&!(id==null&&!j.draft.edit))throw Error('Prvo nastavite sačuvani nacrt.');
+                if(j.draft?.sealed){if(seal&&!allowSealed)throw Error('Čuvanje ovog nacrta je već počelo u drugoj kartici. Ponovo otvorite nacrt.');draft=j.draft;return;}
+                if(j.draft&&expected!==undefined&&canonical(pendingMetadata(j.draft.pending))!==expected)throw Error('Prilozi nacrta su promenjeni u drugoj kartici. Ponovo otvorite nacrt; ništa nije prepisano.');
+                const previous=j.draft;
+                draft={id:previous?.id||id||'gp-'+crypto.randomUUID(),edit:previous?.edit??!!id,operationId:previous?.operationId||operationId||'op-'+crypto.randomUUID(),expected:previous?.expected??canonical(base??null),metadata,attachments,pending:pendingMetadata(pending),sealed:!!seal};
+                j.draft=draft;
+            });
+            const result=structuredClone(draft);onStaged?.(result);return result;
+        };
         const api = {
             mode: options.simulated ? 'simulated-drive' : 'google-drive', writesEnabled: !!options.allowWrites,
             assertWriteAllowed(userId) {
@@ -368,31 +471,72 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 } catch (error) { if (attempt === generation) { disconnect(); state = 'error'; message = error.message; notify(); } }
                 finally { if (connecting === attempt) connecting = null; }
             },
+            pendingFingerprint: pending => canonical(pendingMetadata(pending)),
             getDraft(userId) { assertUser(userId); const d = journal().draft; return d ? structuredClone(d) : null; },
+            async stageDocumentPhoto({userId,operationId,attachment,stage}) {
+                return lock(async()=>{
+                assertUser(userId);
+                const check=()=>{assertUser(userId);const d=journal().draft;if(!d||d.operationId!==operationId||d.sealed)throw Error('Nacrt se promenio. Fotografija nije dodata.');};
+                check(); const expected=canonical(journal().draft);
+                const entry=stage?.pending?.find(a=>a.id===attachment.id);
+                if(!entry||entry.documentPhoto!==true||entry.sha256!==attachment.sha256||entry.size!==attachment.size||entry.mime!==attachment.mime)throw Error('Nacrt ne odgovara potvrđenoj fotografiji.');
+                if(!photoStore)throw Error('Režim Dokumenti nije dostupan u ovoj simulaciji.');
+                if(!(attachment.original instanceof Blob)||attachment.size!==attachment.original.size||attachment.mime!==attachment.original.type||await sha256(attachment.original)!==attachment.sha256)throw Error('Bajtovi fotografije ne odgovaraju prilogu.');
+                check();registerPhotoOperation(userId,operationId);await photoStore.put(userId,operationId,attachment);
+                try { check(); if(canonical(journal().draft)!==expected)throw Error('Nacrt se promenio. Potvrdite fotografiju ponovo.'); return writeDraft({...stage,userId,operationId}); }
+                catch(error) { const d=journal().draft;if(d?.operationId!==operationId||!d.pending.some(a=>a.id===attachment.id))await photoStore.remove(userId,operationId,[attachment.id]);throw error; }
+                });
+            },
+            async cacheReselectedDocumentPhoto({userId,operationId,attachment}) {
+                return lock(async()=>{
+                const check=()=>{assertUser(userId);const d=journal().draft,a=d?.pending.find(a=>a.id===attachment.id&&a.documentPhoto===true);if(d?.operationId!==operationId||!a||a.sha256!==attachment.sha256||a.size!==attachment.size||a.mime!==attachment.mime)throw Error('Ponovo izabrana fotografija ne odgovara aktivnom nacrtu.');};
+                check();if(!photoStore)throw Error('Lokalno skladište fotografija nije dostupno.');
+                if(!(attachment.original instanceof Blob)||attachment.original.size!==attachment.size||attachment.original.type!==attachment.mime||await sha256(attachment.original)!==attachment.sha256)throw Error('Izaberite tačnu konačnu sliku iz nacrta.');
+                check();registerPhotoOperation(userId,operationId);await photoStore.put(userId,operationId,attachment);
+                try { check(); } catch(error) { const d=journal().draft;if(d?.operationId!==operationId||!d.pending.some(a=>a.id===attachment.id))await photoStore.remove(userId,operationId,[attachment.id]);throw error; }
+                });
+            },
+            async restoreDocumentPhotos(userId,draft) {
+                assertUser(userId);
+                const photos=[],missing=[];
+                if(!draft)return {photos,missing};
+                for(const a of draft.pending.filter(a=>a.documentPhoto===true)) {
+                    try {
+                        if(!photoStore)throw Error('Skladište nije dostupno.');
+                        const saved=await photoStore.get(userId,draft.operationId,a.id);
+                        if(!saved||!(saved.blob instanceof Blob)||saved.size!==a.size||saved.mime!==a.mime||saved.sha256!==a.sha256||saved.blob.size!==a.size||saved.blob.type!==a.mime||await sha256(saved.blob)!==a.sha256)throw Error('Fotografija ne odgovara nacrtu.');
+                        photos.push({...a,original:saved.blob});
+                    } catch { missing.push({id:a.id,name:a.name}); }
+                }
+                assertUser(userId);
+                if(journal().draft?.operationId!==draft.operationId)throw Error('Nacrt se promenio tokom obnavljanja fotografija.');
+                return {photos,missing};
+            },
+            getDocumentPhotoCleanups(userId) {
+                assertUser(userId);
+                return Object.values(journal().documentPhotoCleanups||{}).filter(x=>x&&x.uid===userId&&typeof x.operationId==='string'&&['saved','discard'].includes(x.reason)).map(x=>({...x}));
+            },
+            async retryDocumentPhotoCleanup({userId,operationId}) {
+                return lock(async()=>{assertUser(userId);return finishPhotoCleanup(userId,operationId);});
+            },
             async discardDraft({userId,id,operationId,expected}) {
                 assertUser(userId);
                 return lock(async () => {
                     assertUser(userId);
+                    const discarded=journal().draft;
                     mutateJournal(j => {
                         const d = j.draft;
                         if (!d || d.id !== id || d.operationId !== operationId || canonical(d) !== expected) throw new Error('Nacrt se promenio. Odbacivanje je zaustavljeno.');
                         if (d.sealed) throw new Error('Započeto čuvanje mora prvo da se razreši. Nacrt nije odbačen.');
+                        queuePhotoCleanup(j,userId,d,'discard');
                         j.discardedDrafts = { ...j.discardedDrafts, [operationId]: true };
                         j.draft = null;
                     });
+                    notify();
+                    if(hasPhotos(userId,discarded))try { await finishPhotoCleanup(userId,operationId); } catch { return {localCopyRetained:true}; }
                 });
             },
-            stageDraft({userId,id,base,metadata,attachments,pending,operationId}) {
-                assertUser(userId); let draft;
-                mutateJournal(j => {
-                    if (operationId && (j.discardedDrafts?.[operationId] || (j.draft && j.draft.operationId !== operationId))) throw new Error('Ovaj nacrt više nije aktivan. Nema automatskog obnavljanja.');
-                    if(j.draft && (j.draft.id !== id) && !(id == null && !j.draft.edit)) throw new Error('Prvo nastavite sačuvani nacrt.');
-                    if(j.draft?.sealed) { draft=j.draft; return; }
-                    const previous=j.draft;
-                    draft={id:previous?.id || id || 'gp-'+crypto.randomUUID(), edit:previous?.edit ?? !!id, operationId:previous?.operationId || operationId || 'op-'+crypto.randomUUID(), expected:previous?.expected ?? canonical(base ?? null), metadata, attachments, pending:pending.map(({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated})=>({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated})), sealed:false};
-                    j.draft=draft;
-                }); return structuredClone(draft);
-            },
+            async stageDraft(args) { return lock(()=>writeDraft(args)); },
             async checkFolders() {
                 const values=await Promise.all(Object.values(DRIVE_FOLDERS).map(folderInfo));
                 if(values.some((f,i)=>f.id!==Object.values(DRIVE_FOLDERS)[i] || f.name!==['baza-garancije-i-racuni','proizvodi','rezervne-kopije'][i]) || values.slice(1).some(f=>!f.parents?.includes(DRIVE_FOLDERS.root))) throw new Error('Postojeća hijerarhija se ne poklapa. Nema upisa.');
@@ -413,7 +557,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     let d=journal().draft; if(!d) throw new Error('Nema sačuvanog nacrta.');
                     mutateJournal(j=>{j.draft.sealed=true;}); d=journal().draft;
                     const current=await options.metadataStore.read(d.id,userId);
-                    if(current?.lastOperation===d.operationId) { mutateJournal(j=>{j.draft=null;}); return current.attachments || []; }
+                    if(current?.lastOperation===d.operationId) { await cleanPhotos(userId,d); mutateJournal(j=>{if(j.draft?.operationId===d.operationId)j.draft=null;}); return current.attachments || []; }
                     if(canonical(current)!==d.expected) throw new Error('Zapis je u međuvremenu promenjen. Nacrt je očuvan; potrebno je usklađivanje bez prepisivanja.');
                     const refs=[...d.attachments];
                     if(d.pending.length) { needToken(); await api.checkFolders(); }
@@ -430,12 +574,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         }
                         const detail=await json(await request(API+'/files/'+encodeURIComponent(fileId)+'?fields=id,ownedByMe,shared,permissions(type,role,emailAddress)'));
                         if(!detail.ownedByMe || detail.shared!==false || !detail.permissions?.length || detail.permissions.some(p=>p.role!=='owner'||p.type!=='user'||p.emailAddress?.toLowerCase()!==EMAIL)) throw new Error('Privatnost priloga nije potvrđena.');
-                        const {autoNamed,nameCustom,page,pageKind,extension,nameTruncated,...reference}=a;
+                        const {autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto,...reference}=a;
                         refs.push({...reference,driveFileId:fileId,storage:'google-drive'});
                     }
                     // commit must atomically compare the complete original snapshot and merge only edited fields.
                     await options.metadataStore.commit({id:d.id,userId,operationId:d.operationId,expected:d.expected,metadata:d.metadata,attachments:refs});
-                    mutateJournal(j=>{j.draft=null;});
+                    await cleanPhotos(userId,d);
+                    mutateJournal(j=>{if(j.draft?.operationId===d.operationId)j.draft=null;});
                     return refs;
                 });
             },
@@ -515,6 +660,200 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return { id: crypto.randomUUID(), name: file.name, kind: 'Račun', mime: file.type, size: file.size, original: file, sha256, dataUrl, autoNamed:true, nameCustom:false, extension:attachmentNames.extension(file.type,file.name) };
             } catch { URL.revokeObjectURL(dataUrl); throw new Error('Slika nije čitljiva. Original nije poslat.'); }
         };
+
+
+        // All coordinates refer to the browser-oriented image; originals are never rewritten.
+        const documentImage = (() => {
+            const limits={pixels:6000000,edge:8192};
+            const abort = signal => { if(signal?.aborted)throw new DOMException('Obrada je otkazana.','AbortError'); };
+            const yieldUI = () => new Promise(resolve=>setTimeout(resolve,0));
+            const fit = (width,height,pixels=limits.pixels,edge=limits.edge) => {
+                if(!Number.isFinite(width)||!Number.isFinite(height)||width<2||height<2)throw Error('Fotografija nema ispravne dimenzije.');
+                const scale=Math.min(1,edge/Math.max(width,height),Math.sqrt(pixels/(width*height)));
+                return {width:Math.max(2,Math.floor(width*scale)),height:Math.max(2,Math.floor(height*scale)),reduced:scale<0.999};
+            };
+            const canvas = (width,height) => {
+                const c=document.createElement('canvas');c.width=width;c.height=height;
+                if(!c.getContext('2d'))throw Error('Pregledač ne podržava lokalnu obradu slike.');
+                return c;
+            };
+            // Read bounded headers before decoding. This reduces risk, not the browser's internal peak memory.
+            const inspect = async file => {
+                const buffer=await file.slice(0,1048576).arrayBuffer(),v=new DataView(buffer),b=new Uint8Array(buffer);
+                let width,height,orientation=1,orientationSeen=false,resize=false;
+                const exif=(start,end)=>{
+                    if(start+8>end)throw Error('EXIF zaglavlje nije čitljivo.');
+                    const little=v.getUint16(start)===0x4949;
+                    if(!little&&v.getUint16(start)!==0x4d4d)throw Error('EXIF zaglavlje nije čitljivo.');
+                    const word=p=>{if(p<start||p+2>end)throw Error('EXIF zaglavlje nije čitljivo.');return v.getUint16(p,little);};
+                    const long=p=>{if(p<start||p+4>end)throw Error('EXIF zaglavlje nije čitljivo.');return v.getUint32(p,little);};
+                    if(word(start+2)!==42)throw Error('EXIF zaglavlje nije čitljivo.');
+                    const dir=start+long(start+4),count=word(dir);
+                    if(count>1024||dir+2+count*12>end)throw Error('EXIF zaglavlje nije čitljivo.');
+                    for(let i=0;i<count;i++){const p=dir+2+i*12;if(word(p)===0x112){if(word(p+2)!==3||long(p+4)!==1)throw Error('Orijentacija fotografije nije podržana.');const value=word(p+8);if(value<1||value>8)throw Error('Orijentacija fotografije nije podržana.');return value;}}
+                    return 1;
+                };
+                if(file.type==='image/png'&&b.length>=24&&v.getUint32(0)===0x89504e47&&v.getUint32(4)===0x0d0a1a0a&&v.getUint32(12)===0x49484452){width=v.getUint32(16);height=v.getUint32(20);}
+                else if(file.type==='image/jpeg'&&b.length>=4&&v.getUint16(0)===0xffd8){
+                    let p=2,ended=false;
+                    while(p+1<b.length){
+                        if(b[p++]!==255)throw Error('JPEG zaglavlje nije čitljivo.');
+                        while(p<b.length&&b[p]===255)p++;
+                        const marker=b[p++];if(marker===0xda||marker===0xd9){ended=true;break;}if(marker===1||(marker>=0xd0&&marker<=0xd8))continue;
+                        if(p+2>b.length)break;const length=v.getUint16(p),end=p+length;if(length<2||end>b.length)break;
+                        if([0xc0,0xc1,0xc2,0xc3,0xc5,0xc6,0xc7,0xc9,0xca,0xcb,0xcd,0xce,0xcf].includes(marker)){if(length<8)throw Error('JPEG dimenzije nisu čitljive.');height=v.getUint16(p+3);width=v.getUint16(p+5);}
+                        if(marker===0xe1&&length>=8&&String.fromCharCode(...b.slice(p+2,p+8))==='Exif\0\0'){const value=exif(p+8,end);if(orientationSeen&&value!==orientation)throw Error('Orijentacija fotografije je dvosmislena. Možete zadržati original.');orientation=value;orientationSeen=true;}
+                        p=end;
+                    }
+                    if(!ended)throw Error('Zaglavlje je preveliko za bezbednu pripremu. Možete zadržati original.');
+                    resize=true;if(orientation>=5)[width,height]=[height,width];
+                } else throw Error('Za ovaj format nije dostupna provera veličine pre obrade. Možete zadržati original.');
+                if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<2||height<2)throw Error('Dimenzije fotografije nisu čitljive.');
+                if(width*height>(resize?24000000:6000000)||Math.max(width,height)>20000)throw Error('Fotografija je prevelika za ovaj režim Dokumenti. Možete zadržati original; i njegovo otvaranje zavisi od memorije pregledača.');
+                return {width,height,resize};
+            };
+            const load = async (file,signal) => {
+                if(!/^image\/(jpeg|png|webp|gif|bmp|avif)$/i.test(file.type))throw Error('Format fotografije nije podržan. Izaberite podržanu sliku.');
+                const info=await inspect(file);abort(signal);
+                const size=fit(info.width,info.height);
+                let image,url,c;
+                try {
+                    if(typeof createImageBitmap==='function'){
+                        try { image=await createImageBitmap(file,info.resize?{imageOrientation:'from-image',resizeWidth:size.width,resizeHeight:size.height,resizeQuality:'high'}:{imageOrientation:'from-image'}); }
+                        catch { abort(signal); }
+                    }
+                    abort(signal);
+                    if(image&&info.resize&&(image.width!==size.width||image.height!==size.height)){image.close();image=null;if(size.reduced)throw Error('Pregledač nije potvrdio smanjeno dekodiranje. Možete zadržati original.');}
+                    if(!image){
+                        if(size.reduced)throw Error('Smanjeno dekodiranje nije dostupno za ovu fotografiju. Možete zadržati original.');
+                        url=URL.createObjectURL(file);image=await new Promise((resolve,reject)=>{
+                            const img=new Image(),cancel=()=>{img.onload=img.onerror=null;img.src='';reject(new DOMException('Obrada je otkazana.','AbortError'));};
+                            signal?.addEventListener('abort',cancel,{once:true});
+                            const finish=fn=>{signal?.removeEventListener('abort',cancel);fn();};
+                            img.onload=()=>finish(()=>resolve(img));img.onerror=()=>finish(()=>reject(Error('Fotografija nije čitljiva.')));img.src=url;
+                        });
+                    }
+                    abort(signal);
+                    const width=image.naturalWidth||image.width,height=image.naturalHeight||image.height,working=fit(width,height);
+                    c=canvas(working.width,working.height);c.getContext('2d').drawImage(image,0,0,working.width,working.height);
+                    abort(signal);return {canvas:c,width:info.resize?info.width:width,height:info.resize?info.height:height,reduced:size.reduced||working.reduced};
+                }catch(error){if(c){c.width=0;c.height=0;}throw error;}
+                finally{image?.close?.();if(url)URL.revokeObjectURL(url);}
+            };
+            const geometry = (points,width,height) => {
+                if(!Array.isArray(points)||points.length!==4||points.some(p=>!p||!Number.isFinite(p.x)||!Number.isFinite(p.y)||p.x<0||p.x>1||p.y<0||p.y>1))throw Error('Sva četiri ugla moraju biti unutar fotografije.');
+                const p=points.map(p=>({x:p.x*(width-1),y:p.y*(height-1)}));
+                const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+                let area=0;
+                for(let i=0;i<4;i++){const a=p[i],b=p[(i+1)%4],c=p[(i+2)%4];if(distance(a,b)<12||(b.x-a.x)*(c.y-b.y)-(b.y-a.y)*(c.x-b.x)<=1)throw Error('Uglovi moraju redom obuhvatati dokument bez ukrštanja.');area+=a.x*b.y-a.y*b.x;}
+                if(area/2<width*height*0.01)throw Error('Označeni dokument je premali. Razmaknite uglove.');
+                const w=(distance(p[0],p[1])+distance(p[3],p[2]))/2,h=(distance(p[0],p[3])+distance(p[1],p[2]))/2;
+                const size=fit(w,h,limits.pixels,Math.max(w,h)/Math.min(w,h)>3?limits.edge:3200);
+                const [p0,p1,p2,p3]=p,dx1=p1.x-p2.x,dx2=p3.x-p2.x,dx3=p0.x-p1.x+p2.x-p3.x,dy1=p1.y-p2.y,dy2=p3.y-p2.y,dy3=p0.y-p1.y+p2.y-p3.y;
+                let g=0,hp=0;
+                if(Math.abs(dx3)+Math.abs(dy3)>1e-8){const den=dx1*dy2-dx2*dy1;if(Math.abs(den)<1e-8)throw Error('Perspektiva nije ispravna. Podesite uglove.');g=(dx3*dy2-dx2*dy3)/den;hp=(dx1*dy3-dx3*dy1)/den;}
+                const matrix=[p1.x-p0.x+g*p1.x,p3.x-p0.x+hp*p3.x,p0.x,p1.y-p0.y+g*p1.y,p3.y-p0.y+hp*p3.y,p0.y,g,hp];
+                return {...size,matrix};
+            };
+            const map = (m,u,v) => {const d=m[6]*u+m[7]*v+1;if(!Number.isFinite(d)||Math.abs(d)<1e-8)throw Error('Perspektiva nije ispravna.');return {x:(m[0]*u+m[1]*v+m[2])/d,y:(m[3]*u+m[4]*v+m[5])/d};};
+            const rotateIndex = (x,y,w,h,turns) => turns===1?{x:h-1-y,y:x}:turns===2?{x:w-1-x,y:h-1-y}:turns===3?{x:y,y:w-1-x}:{x,y};
+            const render = async (source,points,turns,signal) => {
+                abort(signal);if(!Number.isInteger(turns)||turns<0||turns>3)throw Error('Rotacija nije ispravna.');
+                const geo=geometry(points,source.width,source.height),w=geo.width,h=geo.height;
+                let output;
+                try {
+                    await yieldUI();abort(signal);
+                    const input=source.getContext('2d').getImageData(0,0,source.width,source.height);
+                    output=canvas(turns%2?h:w,turns%2?w:h);
+                    const ctx=output.getContext('2d'),result=ctx.createImageData(output.width,output.height),sw=source.width,sh=source.height;
+                    let slice=performance.now();
+                    for(let y=0;y<h;y++){
+                        for(let x=0;x<w;x++){
+                            const p=map(geo.matrix,x/(w-1),y/(h-1)),sx=Math.max(0,Math.min(sw-1,p.x)),sy=Math.max(0,Math.min(sh-1,p.y)),x0=Math.floor(sx),y0=Math.floor(sy),x1=Math.min(sw-1,x0+1),y1=Math.min(sh-1,y0+1),fx=sx-x0,fy=sy-y0,pos=rotateIndex(x,y,w,h,turns),dest=(pos.y*output.width+pos.x)*4;
+                            const i00=(y0*sw+x0)*4,i10=(y0*sw+x1)*4,i01=(y1*sw+x0)*4,i11=(y1*sw+x1)*4,a00=(1-fx)*(1-fy)*input.data[i00+3]/255,a10=fx*(1-fy)*input.data[i10+3]/255,a01=(1-fx)*fy*input.data[i01+3]/255,a11=fx*fy*input.data[i11+3]/255,white=255*(1-a00-a10-a01-a11);
+                            for(let k=0;k<3;k++)result.data[dest+k]=input.data[i00+k]*a00+input.data[i10+k]*a10+input.data[i01+k]*a01+input.data[i11+k]*a11+white;
+                            result.data[dest+3]=255;
+                        }
+                        if(performance.now()-slice>8){await yieldUI();abort(signal);slice=performance.now();}
+                    }
+                    abort(signal);ctx.putImageData(result,0,0);
+                    const blob=await new Promise((resolve,reject)=>output.toBlob(b=>b?resolve(b):reject(Error('Izvoz fotografije nije uspeo.')),'image/jpeg',0.9));
+                    abort(signal);
+                    if(blob.type!=='image/jpeg')throw Error('Pregledač nije napravio JPEG. Možete zadržati original.');
+                    return {file:new File([blob],'Dokument.jpg',{type:blob.type}),width:output.width,height:output.height};
+                }finally{if(output){output.width=0;output.height=0;}}
+            };
+            return {fit,inspect,geometry,map,rotateIndex,load,render};
+        })();
+
+        function DocumentEditor({file,onConfirm,onCancel}) {
+            const dialog=useRef(null),alive=useRef(true),controller=useRef(null),sourceRef=useRef(null),resultUrl=useRef(null),busyRef=useRef(false),acceptingRef=useRef(false),displayRef=useRef(null);
+            const [source,setSource]=useState(null),[points,setPoints]=useState([{x:.02,y:.02},{x:.98,y:.02},{x:.98,y:.98},{x:.02,y:.98}]),[turns,setTurns]=useState(0);
+            const [result,setResult]=useState(null),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[error,setError]=useState(''),[zoom,setZoom]=useState(false);
+            const [status,setStatus]=useState('Pripremam fotografiju…');
+            const clearResult=()=>{if(resultUrl.current)URL.revokeObjectURL(resultUrl.current);resultUrl.current=null;setResult(null);setZoom(false);};
+            useEffect(()=>{
+                alive.current=true;const ac=new AbortController();controller.current=ac;
+                const previous=document.activeElement;dialog.current?.showModal();
+                documentImage.load(file,ac.signal).then(value=>{
+                    if(!alive.current){value.canvas.width=0;return;}sourceRef.current=value.canvas;setSource(value);setStatus('Pomerite četiri ugla na ivice dokumenta.');
+                }).catch(e=>{if(alive.current&&e.name!=='AbortError'){setError(e.message);setStatus('Možete zadržati original.');}}).finally(()=>{if(alive.current)setLoading(false);});
+                return()=>{alive.current=false;ac.abort();controller.current?.abort();if(sourceRef.current){sourceRef.current.width=0;sourceRef.current.height=0;}if(resultUrl.current)URL.revokeObjectURL(resultUrl.current);dialog.current?.close();previous?.focus?.();};
+            },[file]);
+            useEffect(()=>{const node=displayRef.current;if(node&&source){const k=Math.min(1,600/source.canvas.width);node.width=Math.max(2,Math.round(source.canvas.width*k));node.height=Math.max(2,Math.round(source.canvas.height*k));node.getContext('2d').drawImage(source.canvas,0,0,node.width,node.height);}},[source]);
+            const move=(index,x,y)=>{if(busyRef.current||loading)return;clearResult();setError('');setPoints(old=>old.map((p,i)=>i===index?{x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y))}:p));};
+            const pointer=(e,index)=>{if(!e.currentTarget.hasPointerCapture(e.pointerId))return;const r=e.currentTarget.parentElement.getBoundingClientRect();move(index,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height);};
+            const rotate=()=>{if(busyRef.current||loading)return;clearResult();setTurns(t=>(t+1)%4);};
+            const preview=async()=>{
+                if(busyRef.current||!source)return;
+                busyRef.current=true;setBusy(true);setError('');setStatus('Ispravljam dokument…');const ac=new AbortController();controller.current=ac;
+                try{const value=await documentImage.render(source.canvas,points,turns,ac.signal);if(!alive.current||ac.signal.aborted)return;clearResult();resultUrl.current=URL.createObjectURL(value.file);setResult({...value,url:resultUrl.current});setStatus('Pregledajte sitan tekst pre potvrde.');}
+                catch(e){if(alive.current&&e.name!=='AbortError'){setError(e.message);setStatus('Podesite uglove ili zadržite original.');}}
+                finally{busyRef.current=false;if(alive.current)setBusy(false);}
+            };
+            const accept=async chosen=>{
+                if(busyRef.current||loading)return;acceptingRef.current=true;busyRef.current=true;setBusy(true);setError('');setStatus('Čuvam fotografiju u lokalni nacrt…');
+                try{await onConfirm(chosen);}
+                catch(e){if(alive.current){setError(e.message);setStatus('Fotografija nije dodata. Možete pokušati ponovo.');}}
+                finally{acceptingRef.current=false;busyRef.current=false;if(alive.current)setBusy(false);}
+            };
+            const cancel=()=>{if(acceptingRef.current)return;controller.current?.abort();onCancel();};
+            const size=value=>value<1048576?(value/1024).toFixed(0)+' KB':(value/1048576).toFixed(1)+' MB';
+            return <dialog ref={dialog} className="document-editor" aria-labelledby="document-title" onCancel={e=>{e.preventDefault();cancel();}}>
+                <h2 id="document-title">Dokumenti — nova fotografija</h2>
+                <p>Označite uglove redom: gore levo, gore desno, dole desno, dole levo. Strelice na tastaturi pomeraju izabrani ugao.</p>
+                <p role="status" aria-live="polite">{status}</p>
+                <p>Priprema koristi ograničenu radnu sliku, ali pregledač ne garantuje memorijski plafon. Original: {size(file.size)}{source&&' · '+source.width+' × '+source.height+' px'}. Rotacija izlaza: {turns*90}°.</p>
+                {source?.reduced&&<p>Radni prikaz je smanjen radi memorije telefona. Proverite sitan tekst; original ostaje dostupan pre potvrde.</p>}
+                {source&&<div className="document-stage"><div className="document-sheet">
+                    <canvas aria-label="Fotografija sa četiri ugla" ref={displayRef}/>
+                    <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true"><polygon points={points.map(p=>p.x*1000+','+p.y*1000).join(' ')} fill="rgba(37,99,235,.1)" stroke="#2563eb" strokeWidth="3" vectorEffect="non-scaling-stroke"/></svg>
+                    {points.map((p,i)=><button key={i} type="button" className="document-corner" style={{left:p.x*100+'%',top:p.y*100+'%'}} aria-label={['Gornji levi ugao','Gornji desni ugao','Donji desni ugao','Donji levi ugao'][i]} disabled={busy||loading} onPointerDown={e=>{if(!busyRef.current){e.preventDefault();e.currentTarget.focus();e.currentTarget.setPointerCapture(e.pointerId);}}} onPointerMove={e=>pointer(e,i)} onPointerUp={e=>{if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);}} onKeyDown={e=>{const d=e.shiftKey ? .02 : .005;if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();move(i,p.x+(e.key==='ArrowRight'?d:e.key==='ArrowLeft'?-d:0),p.y+(e.key==='ArrowDown'?d:e.key==='ArrowUp'?-d:0));}}}>{i+1}</button>)}
+                </div></div>}
+                <div className="document-actions"><button type="button" disabled={!source||busy||loading} onClick={rotate}>Rotiraj 90°</button><button type="button" disabled={!source||busy||loading} onClick={preview}>Pregledaj obradu</button></div>
+                {result&&<section aria-label="Pregled obrađenog dokumenta"><p>Obrađena: {size(result.file.size)} · {result.width} × {result.height} px · JPEG{result.file.size>=file.size?' · Fajl nije manji od originala.':''}</p><button type="button" onClick={()=>setZoom(v=>!v)} disabled={busy}>{zoom?'Uklopi pregled':'Uvećaj za čitanje'}</button><div className={'document-result'+(zoom?' document-zoom':'')}><img src={result.url} alt="Obrađeni dokument — proverite čitljivost teksta" style={zoom?{width:result.width,maxWidth:'none'}:{maxWidth:'100%'}}/></div></section>}
+                <p>Do potvrde fotografija nije prilog nacrta. Posle osvežavanja pre potvrde izaberite je ponovo. Potvrđena slika čuva se lokalno u ovom pregledaču do završetka čuvanja ili odbacivanja nacrta. Odjava ne briše lokalne fotografije. Brisanje podataka sajta može ukloniti slike nedovršenog nacrta.</p>
+                {error&&<p role="alert" className="error">{error}</p>}
+                <div className="document-actions"><button type="button" disabled={!result||busy} className="primary" onClick={()=>accept(result.file)}>Koristi obrađenu</button><button type="button" disabled={busy||loading} onClick={()=>accept(file)}>Zadrži original</button><button type="button" disabled={busy&&status.startsWith('Čuvam')} onClick={cancel}>{busy?'Prekini obradu':'Otkaži'}</button></div>
+            </dialog>;
+        }
+
+
+        function LocalPhotoCleanup({user,onComplete}) {
+            const service=window.attachmentService;
+            const [,refresh]=useState(0),[busy,setBusy]=useState(false),[error,setError]=useState('');
+            const running=useRef(false),alive=useRef(true);
+            useEffect(()=>{alive.current=true;const unsubscribe=service.subscribe(()=>{if(alive.current)refresh(v=>v+1);});return()=>{alive.current=false;unsubscribe();};},[service]);
+            let pending=[];try{pending=service.getDocumentPhotoCleanups(user.uid);}catch{}
+            const retry=async operationId=>{
+                if(running.current)return;running.current=true;setBusy(true);setError('');
+                try{await service.retryDocumentPhotoCleanup({userId:user.uid,operationId});if(alive.current)onComplete?.();}
+                catch(e){if(alive.current)setError(e.message);}
+                finally{running.current=false;if(alive.current){setBusy(false);refresh(v=>v+1);}}
+            };
+            if(!pending.length)return null;
+            return <section className="notice" aria-label="Lokalne kopije fotografija"><p>Lokalne kopije završenog ili odbačenog nacrta čekaju čišćenje. Namera je sačuvana; drugi nalozi i aktivni nacrti se ne brišu.</p>{pending.map(item=><button key={item.operationId} type="button" disabled={busy} onClick={()=>retry(item.operationId)}>Pokušaj lokalno čišćenje ponovo</button>)}{error&&<p role="alert" className="error">{error}</p>}</section>;
+        }
 
         function DriveConnection({compact=false}) {
             const service = window.attachmentService;
@@ -609,7 +948,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 {attachments.map((a,n) => {
                     let nameError='';if(onNameChange&&pendingIds.includes(a.id)){try{attachmentNames.validate(a);}catch(e){nameError=e.message;}}
                     return <div key={a.id} className="attachment gp-attachment">
-                    <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>Ponovo izaberite original za nastavak ili proverite već poslati fajl preko Sačuvaj.</p>}
+                    <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>{a.documentPhoto?'Izaberite tačnu konačnu fotografiju za nastavak. Original pre obrade ne odgovara obrađenoj slici. Već poslati fajl proverite preko Sačuvaj.':'Ponovo izaberite original za nastavak ili proverite već poslati fajl preko Sačuvaj.'}</p>}
                     {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
                     {onNameChange&&pendingIds.includes(a.id)&&<div><label>Naziv priloga {n+1} (bez ekstenzije)<input type="text" aria-label={'Naziv priloga '+(n+1)} value={attachmentNames.base(a.name,a.mime,a.extension)} onChange={e=>onNameChange(a.id,e.target.value)} autoComplete="off"/></label><p className="small muted">Ekstenzija je zaključana: {a.extension||attachmentNames.extension(a.mime,a.name)}{a.kind==='Ostalo'?' · Slobodan naziv po vašem izboru.':''}</p>{a.nameTruncated&&<p role="status" className="small muted">Automatski predlog je skraćen na 120 znakova. Pregledajte ceo naziv iznad.</p>}{nameError&&<p role="alert" className="error">{nameError}</p>}</div>}
                     {a.dataUrl && !a.legacy && <img src={a.dataUrl} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
@@ -625,7 +964,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.26.3';
+        const RELEASE_VERSION = '2026.10.26.4';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -1012,13 +1351,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     {view!=='list'&&view!=='settings'&&<div className="context-drive"><DriveConnection compact/></div>}
                     <div hidden={view!=='list'}>
                         <section className="hero"><p className="section-label">VAŠA DIGITALNA EVIDENCIJA</p><h1 data-page-heading tabIndex={-1}>Računi i garancije</h1><p>Uredno složeni i uvek pri ruci. Više reda, manje traženja.</p><button type="button" className="primary icon-button" disabled={formBusy} onClick={()=>openForm()}><Icon name="plus"/>Dodaj proizvod</button></section>
-                        {view==='list'&&<DriveConnection compact/>}
+                        {view==='list'&&<><DriveConnection compact/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije završenog nacrta su uklonjene.')}/></>}
                         <button type="button" className="resume-draft" disabled={formBusy} onClick={()=>openForm()}>Nastavi nacrt / novi unos</button>
                         <Catalog key={user.uid} records={warranties} user={user} listState={listState} onRetry={()=>setRetry(r=>r+1)} onOpen={w=>{setSelected(w);navigate('detail');}}/>
                     </div>
                     {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>finishNavigation(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list')} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list');setNotice('Nacrt je odbačen.');}} user={user}/></div>}
                     {view==='detail'&&selected&&<Detail onEdit={()=>openForm(selected)} onAddAttachment={()=>openForm(selected,true)} onBusy={setFormBusy} item={selected} onBack={()=>finishNavigation('list')} user={user}/>}
-                    {view==='settings'&&<section className="page-content settings-shell"><button type="button" className="quiet back-button" disabled={formBusy} onClick={()=>navigate('list')}><Icon name="arrow-left"/>Moja evidencija</button><h1 data-page-heading tabIndex={-1}>Podešavanja</h1><section className="panel"><h2>Nalog</h2><p className="account-name">{textValue(user.email)||'Prijavljeni nalog'}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={logout}><Icon name="log-out"/> Odjavi se</button></section><section className="panel"><DriveConnection/></section><section className="panel"><h2>Verzija i nacrt</h2><p>Verzija {RELEASE_VERSION}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={()=>openForm()}>Nastavi nacrt / novi unos</button></section></section>}
+                    {view==='settings'&&<section className="page-content settings-shell"><button type="button" className="quiet back-button" disabled={formBusy} onClick={()=>navigate('list')}><Icon name="arrow-left"/>Moja evidencija</button><h1 data-page-heading tabIndex={-1}>Podešavanja</h1><section className="panel"><h2>Nalog</h2><p className="small muted">Odjava ne briše lokalne fotografije nedovršenog nacrta. Brisanje podataka sajta može ih ukloniti.</p><p className="account-name">{textValue(user.email)||'Prijavljeni nalog'}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={logout}><Icon name="log-out"/> Odjavi se</button></section><section className="panel"><DriveConnection/></section><section className="panel"><h2>Verzija i nacrt</h2><p>Verzija {RELEASE_VERSION}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={()=>openForm()}>Nastavi nacrt / novi unos</button></section></section>}
                     <nav className="bottom-nav" aria-label="Glavna navigacija">
                         <button type="button" aria-current={view==='list'?'page':undefined} disabled={formBusy} onClick={()=>navigate('list')}><Icon name="layout-grid"/><span>Proizvodi</span></button>
                         <button type="button" aria-current={view==='add'||view==='edit'?'page':undefined} disabled={formBusy||view==='add'||view==='edit'} onClick={()=>openForm()}><Icon name="plus"/><span>Dodaj</span></button>
@@ -1034,6 +1373,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const draftConflict = !draftMatchesRecord(savedDraft, initial);
             const restored = useRef(draftConflict ? null : savedDraft);
             const draftOperation = useRef(restored.current?.operationId || 'op-' + crypto.randomUUID());
+            const draftPending = useRef(service.pendingFingerprint(restored.current?.pending||[]));
             const disposed = useRef(false), discardingRef = useRef(false);
             const [discarding, setDiscarding] = useState(false);
             const [sealed, setSealed] = useState(!!restored.current?.sealed);
@@ -1055,28 +1395,78 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const needsService = pending.length > 0 || attachments.length > 0;
             const malformedAttachments = initial?.attachments != null && (!Array.isArray(initial.attachments) || attachmentRefs(initial).length !== initial.attachments.length);
             const [saving, setSaving] = useState(false);
-            const [processing, setProcessing] = useState(false);
+            const recoveringPhotos=!!restored.current?.pending.some(a=>a.documentPhoto===true);
+            const [processing, setProcessing] = useState(recoveringPhotos);
+            const [documentFile,setDocumentFile]=useState(null);
+            const cameraAccepting=useRef(false);
             const [error, setError] = useState('');
             const [imageError, setImageError] = useState('');
-            const savingRef = useRef(false), processingRef = useRef(0);
+            const savingRef = useRef(false), processingRef = useRef(recoveringPhotos?1:0);
+            const [staging,setStaging]=useState(false),stagingRef=useRef(false),stageSequence=useRef(0);
             const mounted = useRef(true);
             useEffect(() => {
                 mounted.current = true;
                 return () => { mounted.current = false; for (const url of pendingUrls.current) URL.revokeObjectURL(url); };
             }, []);
-            useEffect(() => { onBusy(saving || discarding || processing); return () => onBusy(false); }, [saving, discarding, processing, onBusy]);
+            useEffect(()=>{
+                if(!recoveringPhotos)return;
+                let cancelled=false;
+                service.restoreDocumentPhotos(user.uid,restored.current).then(({photos:rows,missing})=>{
+                    if(cancelled||!mounted.current||disposed.current)return;
+                    if(missing.length)setImageError('Nedostaju konačne fotografije: '+missing.map(a=>a.name).join(', ')+'. Ostale su obnovljene. Izaberite tačne konačne slike ili proverite već poslati fajl preko Sačuvaj; original pre obrade ne odgovara obrađenoj slici.');
+                    const recovered=rows.map(a=>({...a,dataUrl:URL.createObjectURL(a.original)}));
+                    for(const a of recovered)pendingUrls.current.add(a.dataUrl);
+                    setPending(previous=>previous.map(a=>{const found=recovered.find(r=>r.id===a.id&&r.sha256===a.sha256&&r.size===a.size&&r.mime===a.mime);return found?{...a,original:found.original,dataUrl:found.dataUrl}:a;}));
+                }).catch(e=>{if(!cancelled&&mounted.current)setImageError(e.message);})
+                .finally(()=>{if(!cancelled){processingRef.current--;if(mounted.current)setProcessing(processingRef.current>0);}});
+                return()=>{cancelled=true;};
+            },[]);
+            const cameraCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
+            const handleCamera=e=>{
+                if(disposed.current||discardingRef.current||savingRef.current||processingRef.current||stagingRef.current||sealed)return;
+                const file=e.target.files?.[0];e.target.value='';if(!file)return;
+                if(!cameraCurrent()){setImageError('Aktivni nacrt nije dostupan. Fotografija nije dodata.');return;}
+                processingRef.current++;setProcessing(true);setImageError('');setDocumentFile(file);
+            };
+            const closeDocument=()=>{if(cameraAccepting.current)return;setDocumentFile(null);processingRef.current=Math.max(0,processingRef.current-1);setProcessing(processingRef.current>0);};
+            const confirmDocument=async file=>{
+                if(cameraAccepting.current||!cameraCurrent())throw Error('Nacrt više nije aktivan. Fotografija nije dodata.');
+                cameraAccepting.current=true;let a,staged=false;
+                try{
+                    a={...await readAttachment(file),documentPhoto:true};
+                    if(!cameraCurrent())throw Error('Nacrt se promenio. Fotografija nije dodata.');
+                    const next=attachmentNames.prepare([...pending,a],[...legacy,...attachments],form.name);
+                    const {id,...base}=initial||{};
+                    const acceptedDraft=await service.stageDocumentPhoto({userId:user.uid,operationId:draftOperation.current,attachment:a,stage:{id:initial?.id||null,base:initial?base:null,metadata:form,attachments,pending:next,expectedPending:()=>draftPending.current,isCurrent:cameraCurrent,onStaged:acknowledgeDraft}});
+                    draftPending.current=service.pendingFingerprint(acceptedDraft.pending);staged=true;
+                    if(!cameraCurrent())throw Error('Fotografija je sačuvana u lokalnom nacrtu. Otvorite isti nacrt za nastavak.');
+                    pendingUrls.current.add(a.dataUrl);setPending(next);setDocumentFile(null);
+                    processingRef.current=Math.max(0,processingRef.current-1);setProcessing(processingRef.current>0);
+                }catch(e){if(a&&!pendingUrls.current.has(a.dataUrl))URL.revokeObjectURL(a.dataUrl);if(staged&&mounted.current)setImageError(e.message);throw e;}
+                finally{cameraAccepting.current=false;}
+            };
+            useEffect(() => { onBusy(saving || discarding || processing || staging); return () => onBusy(false); }, [saving, discarding, processing, staging, onBusy]);
             useEffect(()=>{
                 if(sealed||savingRef.current||disposed.current||discardingRef.current)return;
                 setPending(previous=>attachmentNames.prepare(previous,[...legacy,...attachments],form.name));
             },[form.name,attachments,pending,sealed]);
-            useEffect(() => {
-                if (!mounted.current || disposed.current || discardingRef.current || savingRef.current || sealed) return;
-                try {
-                    if (!draftMatchesRecord(service.getDraft(user.uid), initial)) throw new Error(draftConflictMessage);
-                    const {id, ...base} = initial || {}; service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:form,attachments,pending,operationId:draftOperation.current});
+            const acknowledgeDraft=draft=>{
+                draftPending.current=service.pendingFingerprint(draft.pending);
+                if(mounted.current&&draft.sealed)setSealed(true);
+            };
+            useEffect(()=>{
+                const ticket=++stageSequence.current;let cancelled=false;
+                if(!mounted.current||disposed.current||discardingRef.current||savingRef.current||sealed||processingRef.current){
+                    stagingRef.current=false;setStaging(false);return;
                 }
-                catch(e) { setError(e.message); }
-            }, [form,attachments,pending,sealed]);
+                stagingRef.current=true;setStaging(true);
+                const current=()=>!cancelled&&ticket===stageSequence.current&&mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&!processingRef.current;
+                const {id,...base}=initial||{};
+                service.stageDraft({userId:user.uid,id:initial?.id||null,base:initial?base:null,metadata:form,attachments,pending,operationId:draftOperation.current,expectedPending:()=>draftPending.current,isCurrent:current,onStaged:acknowledgeDraft})
+                    .catch(e=>{if(current()&&e.name!=='AbortError')setError(e.message);})
+                    .finally(()=>{if(ticket===stageSequence.current){stagingRef.current=false;if(mounted.current)setStaging(false);}});
+                return()=>{cancelled=true;};
+            },[form,attachments,pending,sealed]);
             const change = (field, value) => { if(!sealed && !savingRef.current && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
             const [qrNotice,setQrNotice]=useState('');
             const qrCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
@@ -1084,13 +1474,21 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const expiry = calcExp(form.purchaseDate, form.baseMonths, form.extendedMonths);
 
             const handleFile = async e => {
-                if (disposed.current || discardingRef.current || savingRef.current || processingRef.current) return;
+                if (disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current) return;
                 const files = Array.from(e.target.files); e.target.value = '';
                 if (!files.length) return;
                 processingRef.current++; setProcessing(true); setImageError('');
                 try {
                     const results = await Promise.allSettled(files.map(readAttachment));
-                    const good = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+                    const good = [];
+                    for(const result of results.filter(r=>r.status==='fulfilled')) {
+                        const a=result.value,old=pending.find(p=>!p.original&&p.documentPhoto===true&&p.sha256===a.sha256&&p.size===a.size&&p.mime===a.mime);
+                        if(old) {
+                            try { await service.cacheReselectedDocumentPhoto({userId:user.uid,operationId:draftOperation.current,attachment:{...a,id:old.id}}); }
+                            catch(e) { URL.revokeObjectURL(a.dataUrl);setImageError(e.message);continue; }
+                        }
+                        good.push(a);
+                    }
                     if (!mounted.current || disposed.current || discardingRef.current) { for (const a of good) URL.revokeObjectURL(a.dataUrl); return; }
                     for (const a of good) pendingUrls.current.add(a.dataUrl);
                     setPending(previous => {
@@ -1140,7 +1538,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if (!draftMatchesRecord(service.getDraft(user.uid), initial)) throw new Error(draftConflictMessage);
                     const {id, ...base} = initial || {};
                     const data = formMetadata(form, initial);
-                    service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:data,attachments,pending:readyPending,operationId:draftOperation.current});
+                    service.assertWriteAllowed(user.uid);
+                    await service.stageDraft({userId:user.uid,id:initial?.id||null,base:initial?base:null,metadata:data,attachments,pending:readyPending,operationId:draftOperation.current,expectedPending:()=>draftPending.current,isCurrent:()=>mounted.current&&!disposed.current&&!discardingRef.current,onStaged:acknowledgeDraft,seal:true,allowSealed:sealed});
+                    if(!mounted.current||disposed.current)return;
                     setPending(readyPending);setSealed(true);
                     await service.saveWarranty({userId:user.uid,newAttachments:readyPending});
                     if (mounted.current) onSave();
@@ -1153,14 +1553,16 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
 
             const discard = async () => {
-                if (disposed.current || discardingRef.current || savingRef.current || processingRef.current || sealed) return;
+                if (disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current || sealed) return;
                 discardingRef.current = true; setDiscarding(true);
                 try {
                     const d = service.getDraft(user.uid);
                     if (!d || !draftMatchesRecord(d, initial) || d.operationId !== draftOperation.current) throw new Error('Nacrt se promenio. Odbacivanje je zaustavljeno.');
+                    if(service.pendingFingerprint(d.pending)!==draftPending.current)throw Error('Prilozi nacrta su promenjeni u drugoj kartici. Ponovo otvorite nacrt; ništa nije prepisano.');
                     const expected = window.garancijeFingerprint(d);
                     if (!window.confirm('Odbaci ovaj nezavršeni nacrt? Njegovi nesačuvani podaci i lokalni prilozi biće uklonjeni sa ovog uređaja. Sačuvane garancije i fajlovi na Drive-u neće biti obrisani.')) return;
-                    await service.discardDraft({userId:user.uid,id:d.id,operationId:d.operationId,expected});
+                    const discarded=await service.discardDraft({userId:user.uid,id:d.id,operationId:d.operationId,expected});
+                    if(discarded?.localCopyRetained)window.alert('Nacrt je odbačen. Pregledač nije uspeo da ukloni njegovu lokalnu kopiju fotografije; podaci na Drive-u nisu menjani.');
                     disposed.current = true; mounted.current = false;
                     for (const url of pendingUrls.current) URL.revokeObjectURL(url);
                     pendingUrls.current.clear(); setPending([]); setAttachments([]);
@@ -1175,10 +1577,12 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
             return (
                 <form onSubmit={submit} aria-busy={saving || processing || discarding} className="form-shell gp-form">
+                    {documentFile&&<DocumentEditor file={documentFile} onConfirm={confirmDocument} onCancel={closeDocument}/>}
                     <div className="form-heading"><p className="section-label">{initial ? 'IZMENA POSTOJEĆE GARANCIJE' : 'NOVI UNOS GARANCIJE'}</p><h1 data-page-heading tabIndex={-1}>{initial ? 'Izmena garancije' : 'Dodaj proizvod'}</h1></div>
                     <p className="text-sm mb-3">Nacrt se čuva na ovom uređaju. Odustani zatvara formu i zadržava nacrt.</p>
                     {sealed && <p role="status">Nastavak započetog čuvanja: podaci su zaključani dok se ishod ne potvrdi. Nedostajuće originale izaberite ponovo.</p>}
                     {error && <p role="alert" className="text-red-700">{error}</p>}
+                    {staging&&!saving&&<p role="status">Čuvam lokalni nacrt…</p>}
                     <fieldset disabled={saving || discarding} className="space-y-4">
                         {!initial&&<ReceiptQR disabled={saving||processing||discarding||sealed} isCurrent={qrCurrent} onApply={applyQR}/>}
                         {qrNotice&&<p role="status">{qrNotice}</p>}
@@ -1210,12 +1614,12 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                             {service?.mode === 'simulated-drive' ? 'SIMULACIJA: podaci i slike ostaju u lokalnom demo skladištu i posle osvežavanja. Nema stvarnog Drive-a.' : 'Lokalna priprema: produkcioni upis nije aktiviran.'}
                         </div>}
                         <section className="form-block" id="attachment-section" tabIndex={-1}><h2>Dokumenti i prilozi</h2><div className="space-y-3">
-                            <p id="attachment-picker-help" className="text-sm text-slate-600">Slikaj račun kamerom ili dodaj slike iz galerije. Prethodni prilozi ostaju sačuvani.</p>
-                            <input ref={cameraInput} type="file" accept="image/*" capture="environment" aria-label="Slika računa iz kamere" disabled={saving || processing} onChange={handleFile} className="hidden" />
-                            <input ref={galleryInput} type="file" accept="image/*" multiple aria-label="Slike iz galerije" disabled={saving || processing} onChange={handleFile} className="hidden" />
+                            <p id="attachment-picker-help" className="text-sm text-slate-600">Fotografija iz kamere otvara režim Dokumenti sa ručnim uglovima. Galerija dodaje originalne slike. Prethodni prilozi ostaju sačuvani.</p>
+                            <input ref={cameraInput} type="file" accept="image/*" capture="environment" aria-label="Fotografija dokumenta iz kamere" disabled={saving || processing || staging || sealed} onChange={handleCamera} className="hidden" />
+                            <input ref={galleryInput} type="file" accept="image/*" multiple aria-label="Slike iz galerije" disabled={saving || processing || staging} onChange={handleFile} className="hidden" />
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                <button type="button" disabled={saving || processing} aria-describedby="attachment-picker-help" onClick={() => cameraInput.current?.click()} className="primary min-h-[48px] w-full px-4 py-3 rounded-xl bg-blue-600 text-white font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">Slikaj račun</button>
-                                <button type="button" disabled={saving || processing} aria-describedby="attachment-picker-help" onClick={() => galleryInput.current?.click()} className="min-h-[48px] w-full px-4 py-3 rounded-xl border border-blue-600 text-blue-700 font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">Dodaj iz galerije</button>
+                                <button type="button" disabled={saving || processing || staging || sealed} aria-describedby="attachment-picker-help" onClick={() => cameraInput.current?.click()} className="primary min-h-[48px] w-full px-4 py-3 rounded-xl bg-blue-600 text-white font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">Slikaj dokument</button>
+                                <button type="button" disabled={saving || processing || staging} aria-describedby="attachment-picker-help" onClick={() => galleryInput.current?.click()} className="min-h-[48px] w-full px-4 py-3 rounded-xl border border-blue-600 text-blue-700 font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">Dodaj iz galerije</button>
                             </div>
                         </div>
                         {processing && <p role="status">Obrada fotografija...</p>}
@@ -1223,11 +1627,11 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
                         {imageError && <p role="alert" className="text-red-700">{imageError}</p>}
                         </section><div className="form-actions">
-                            <button type="button" onClick={onCancel} className="flex-1 py-3 border border-slate-300 rounded-xl font-bold text-slate-500">Odustani</button>
+                            <button type="button" disabled={saving||processing||discarding||staging} onClick={onCancel} className="flex-1 py-3 border border-slate-300 rounded-xl font-bold text-slate-500">Odustani</button>
                             <button type="submit" disabled={saving || processing} className="primary flex-1 py-3 font-bold disabled:opacity-50">{saving ? 'Čuvanje...' : error ? 'Pokušaj ponovo' : 'Sačuvaj'}</button>
                         </div>
                         <div className="border-t pt-4">
-                            <button type="button" onClick={discard} disabled={saving || processing || discarding || sealed} className="w-full min-w-0 min-h-[48px] whitespace-normal break-words px-4 py-3 border border-red-300 text-red-700 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed">Odbaci nacrt</button>
+                            <button type="button" onClick={discard} disabled={saving || processing || staging || discarding || sealed} className="w-full min-w-0 min-h-[48px] whitespace-normal break-words px-4 py-3 border border-red-300 text-red-700 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed">Odbaci nacrt</button>
                         </div>
                     </fieldset>
                 </form>
