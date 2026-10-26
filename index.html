@@ -625,7 +625,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.26.1';
+        const RELEASE_VERSION = '2026.10.26.2';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -667,7 +667,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         };
 
         const fiscalLink = raw => {
-            if(typeof raw!=='string'||raw.length>2048||raw!==raw.trim())throw Error('Neispravan fiskalni link.');
+            if(typeof raw!=='string'||raw.length>2048||raw!==raw.trim()||/[\u0000-\u001f\u007f]/.test(raw))throw Error('Neispravan fiskalni link.');
             const u=new URL(raw);
             if(u.protocol!=='https:'||u.hostname!=='mapr.tax.gov.me'||u.port||u.username||u.password||u.pathname!=='/ic/'||u.search||!u.hash.startsWith('#/verify?'))throw Error('Dozvoljen je samo HTTPS fiskalni link sa domena mapr.tax.gov.me.');
             // A literal plus in crtd is a timezone sign, not a form-encoded space.
@@ -677,7 +677,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             }).join('&');
             const p=new URLSearchParams(query),keys=['iic','tin','crtd','ord','bu','cr','sw','prc'];
             if([...p.keys()].some(k=>!keys.includes(k))||keys.some(k=>p.getAll(k).length!==1))throw Error('Fiskalni link nema ispravne parametre.');
-            const date=p.get('crtd'),timestamp=/^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:Z|[+-](?:0\d|1[0-3]):[0-5]\d|[+-]14:00)$/.exec(date);
+            const date=p.get('crtd'),timestamp=/^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:Z|[-+ ](?:0\d|1[0-3]):[0-5]\d|[-+ ]14:00)$/.exec(date);
             if(!/^[A-Fa-f0-9]{32}$/.test(p.get('iic'))||!/^\d{8}$/.test(p.get('tin'))||!timestamp||!parseDate(timestamp[1])||!/^\d{1,12}$/.test(p.get('ord'))||['bu','cr','sw'].some(k=>!(/^[a-zA-Z0-9]{1,32}$/).test(p.get(k)))||!/^\d{1,10}(\.\d{1,2})?$/.test(p.get('prc')))throw Error('Fiskalni link sadrži neispravne vrednosti.');
             u.hash='#/verify?'+query;
             return {url:u.href,iic:p.get('iic'),tin:p.get('tin'),date};
@@ -714,16 +714,24 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             for(const [key,value]of Object.entries(proposal)){if(value===undefined||value===null||value==='')continue;if(form[key]!==undefined&&form[key]!==null&&String(form[key]).trim()!=='')kept.push(key);else next[key]=value;}
             return {next,kept};
         };
+        const fiscalQrBox = (width,height) => {
+            const edge=Math.floor(Math.min(width,height));
+            if(!Number.isFinite(edge)||edge<66)throw Error('Pregled kamere je premali za QR okvir.');
+            const size=Math.min(320,edge-16,Math.max(50,Math.floor(edge*0.8)));
+            return {width:size,height:size};
+        };
         function ReceiptQR({disabled,isCurrent,onApply}) {
             const [link,setLink]=useState(''),[receipt,setReceipt]=useState(null),[selected,setSelected]=useState(''),[priceChoice,setPriceChoice]=useState(''),[confirmedEUR,setConfirmedEUR]=useState(false);
             const [busy,setBusy]=useState(false),[error,setError]=useState(''),[camera,setCamera]=useState(false);
-            const life=useRef({active:true,seq:0,busy:false,scanner:null,controller:null,queue:Promise.resolve()}),file=useRef(null),region=useRef('fiscal-qr-'+crypto.randomUUID());
+            const [phase,setPhase]=useState('idle'),[decoded,setDecoded]=useState(false),[hint,setHint]=useState(false);
+            const life=useRef({active:true,seq:0,busy:false,scanner:null,controller:null,queue:Promise.resolve(),hintTimer:null,decoded:false}),file=useRef(null),region=useRef('fiscal-qr-'+crypto.randomUUID());
             const guards=useRef({disabled,isCurrent});guards.current={disabled,isCurrent};
             // Camera startup and cleanup share one queue, including cancellation during start().
             const serial=run=>{const l=life.current,task=l.queue.then(run,run);l.queue=task.catch(()=>{});return task;};
             const stop=async scanner=>{if(!scanner)return;if(scanner.isScanning)await scanner.stop();await scanner.clear();if(life.current.scanner===scanner)life.current.scanner=null;};
-            const finish=seq=>{const l=life.current;if(l.seq!==seq)return;l.busy=false;l.controller=null;if(l.active){setBusy(false);setCamera(false);}};
-            const cancel=()=>{const l=life.current,seq=++l.seq;l.controller?.abort();l.controller=null;l.busy=false;void serial(()=>stop(l.scanner)).catch(()=>{if(l.active&&l.seq===seq)setError('Skener nije zaustavljen. Pokušajte ponovo da otkažete QR unos.');});if(l.active){setBusy(false);setCamera(false);setReceipt(null);setError('');}};
+            const clearHint=()=>{clearTimeout(life.current.hintTimer);life.current.hintTimer=null;};
+            const finish=seq=>{const l=life.current;if(l.seq!==seq)return;clearHint();l.busy=false;l.controller=null;if(l.active){setBusy(false);setCamera(false);setHint(false);}};
+            const cancel=()=>{const l=life.current,seq=++l.seq;l.controller?.abort();l.controller=null;l.busy=false;l.decoded=false;clearHint();void serial(()=>stop(l.scanner)).catch(()=>{if(l.active&&l.seq===seq)setError('Skener nije zaustavljen. Pokušajte ponovo da otkažete QR unos.');});if(l.active){setBusy(false);setCamera(false);setReceipt(null);setError('');setPhase('idle');setDecoded(false);setHint(false);}};
             useEffect(()=>{life.current.active=true;return()=>{life.current.active=false;cancel();};},[]);
             useEffect(()=>{if(disabled)cancel();},[disabled]);
             const current=seq=>life.current.active&&life.current.seq===seq&&!guards.current.disabled&&guards.current.isCurrent();
@@ -734,42 +742,44 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     const valid=fiscalLink(raw);
                     setLink(valid.url);setReceipt(null);setSelected('');setPriceChoice('');setConfirmedEUR(false);
                     const controller=new AbortController();life.current.controller=controller;
-                    timer=setTimeout(()=>controller.abort(),20000);phase='fetch';
-                    const result=await readFiscalReceipt(valid.url,controller.signal);if(current(seq)){setReceipt(result);setError('');}
-                }catch(e){if(current(seq))setError(phase==='validation'?e.message:e.name==='AbortError'?'Preuzimanje računa je isteklo. Pokušajte ponovo.':'Preuzimanje sa fiskalnog portala nije uspelo. Pokušajte ponovo ili sačuvajte link u formi.');}
+                    timer=setTimeout(()=>controller.abort(),20000);phase='fetch';setPhase('loading');
+                    const result=await readFiscalReceipt(valid.url,controller.signal);if(current(seq)){if(result.items.length){setReceipt(result);setError('');setPhase('ready');}else{setPhase(life.current.decoded?'decoded':'idle');setError('Račun je preuzet, ali nema stavki za izbor. Pokušajte ponovo ili sačuvajte link u formi.');}}
+                }catch(e){if(current(seq)){setPhase(life.current.decoded?'decoded':'idle');setError(phase==='validation'?e.message:e.name==='AbortError'?'Preuzimanje računa je isteklo. Pokušajte ponovo.':'Preuzimanje sa fiskalnog portala nije uspelo. Pokušajte ponovo ili sačuvajte link u formi.');}}
                 finally{clearTimeout(timer);finish(seq);}
             };
-            const begin=()=>{const l=life.current;if(l.busy||!current(l.seq))return null;l.busy=true;setBusy(true);setError('');return ++l.seq;};
+            const begin=(nextPhase='idle')=>{const l=life.current;if(l.busy||!current(l.seq))return null;clearHint();l.busy=true;l.decoded=false;setBusy(true);setError('');setReceipt(null);setPhase(nextPhase);setDecoded(false);setHint(false);return ++l.seq;};
             const paste=()=>{const seq=begin();if(seq!==null)void lookup(link,seq);};
             const scanFile=async event=>{
                 const image=event.target.files?.[0];event.target.value='';if(!image)return;
-                const seq=begin();if(seq===null)return;
+                const seq=begin('file');if(seq===null)return;
                 try{
                     const raw=await serial(async()=>{
                         await stop(life.current.scanner);if(!current(seq))return null;
                         if(!window.Html5Qrcode)throw Error();const scanner=new window.Html5Qrcode(region.current,{formatsToSupport:[window.Html5QrcodeSupportedFormats.QR_CODE],useBarCodeDetectorIfSupported:false});life.current.scanner=scanner;
-                        try{return await scanner.scanFile(image,false);}finally{await stop(scanner);}
+                        try{const raw=await scanner.scanFile(image,false);if(current(seq)){life.current.decoded=true;setDecoded(true);setPhase('decoded');clearHint();setHint(false);}return raw;}finally{await stop(scanner);}
                     });
                     if(current(seq)&&raw!==null)await lookup(raw,seq);else finish(seq);
-                }catch(e){if(current(seq))setError('QR nije očitan. Izaberite jasniju sliku ili nalepite link.');finish(seq);}
+                }catch(e){if(current(seq)){setPhase(life.current.decoded?'decoded':'idle');setError(life.current.decoded?'QR kod je očitan, ali skener nije očišćen. Otkažite QR unos i pokušajte ponovo.':'QR nije očitan. Izaberite jasniju sliku ili nalepite link.');}finish(seq);}
             };
             const scanCamera=async()=>{
-                const seq=begin();if(seq===null)return;setCamera(true);
+                const seq=begin('starting');if(seq===null)return;setCamera(true);
                 try{
                     await serial(async()=>{
                         await stop(life.current.scanner);if(!current(seq))return;
                         if(!window.Html5Qrcode)throw Error();const scanner=new window.Html5Qrcode(region.current,{formatsToSupport:[window.Html5QrcodeSupportedFormats.QR_CODE],useBarCodeDetectorIfSupported:false});life.current.scanner=scanner;let detected=false;
                         try{
-                            await scanner.start({facingMode:'environment'},{fps:8,qrbox:{width:220,height:220}},raw=>{
-                                if(detected||!current(seq)){if(life.current.seq===seq&&!current(seq))cancel();return;}detected=true;
+                            await scanner.start({facingMode:'environment'},{fps:8,qrbox:fiscalQrBox},raw=>{
+                                if(detected||!current(seq)){if(life.current.seq===seq&&!current(seq))cancel();return;}detected=true;life.current.decoded=true;clearHint();setHint(false);setDecoded(true);setPhase('decoded');
                                 void serial(()=>stop(scanner)).then(()=>{if(current(seq)){setCamera(false);return lookup(raw,seq);}finish(seq);}).catch(()=>{if(current(seq))setError('Skener nije zaustavljen. Otkažite QR unos i pokušajte ponovo.');finish(seq);});
                             },()=>{if(life.current.seq===seq&&!current(seq))cancel();});
                             if(!current(seq))await stop(scanner);
+                            else if(!detected){setPhase('searching');life.current.hintTimer=setTimeout(()=>{if(!current(seq))return;life.current.hintTimer=null;if(life.current.busy&&!life.current.decoded)setHint(true);},6000);}
                         }catch(e){await stop(scanner);throw e;}
                     });
                     if(!current(seq))finish(seq);
-                }catch(e){if(current(seq))setError('Kamera nije dostupna ili dozvola nije data. Učitajte sliku ili nalepite link.');finish(seq);}
+                }catch(e){if(current(seq)){setPhase(life.current.decoded?'decoded':'idle');setError('Kamera nije dostupna ili dozvola nije data. Učitajte sliku ili nalepite link.');}finish(seq);}
             };
+            const statusText=phase==='starting'?'Pokrećem kameru…':phase==='searching'?'Tražim QR kod…'+(hint?' Približite ili udaljite račun dok QR kod ne stane u okvir i obezbedite više svetla.':''):phase==='decoded'?'QR kod je očitan ✓':phase==='loading'?(decoded?'QR kod je očitan ✓ · ':'')+'Učitavam stavke računa…':phase==='ready'?'Račun je učitan — izaberite proizvod.':phase==='file'?'Čitam QR kod sa slike…':'';
             const item=receipt?.items[Number(selected)];
             const chosenPrice=item?(item.quantity===1?item.line:priceChoice==='unit'?item.unit:priceChoice==='line'?item.line:undefined):undefined;
             const applySeq=life.current.seq;
@@ -778,11 +788,11 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <h3 className="font-bold">Dodaj podatke sa fiskalnog računa</h3>
                 <div className="qr-actions"><button type="button" disabled={disabled||busy} onClick={scanCamera} className="catalog-button">Skeniraj QR</button><button type="button" disabled={disabled||busy} onClick={()=>file.current?.click()} className="catalog-button">Učitaj QR sa slike</button></div>
                 <input ref={file} type="file" accept="image/*" onChange={scanFile} disabled={disabled||busy} className="hidden" aria-label="Slika QR koda računa"/>
-                <label className="block">Nalepi link<input type="url" value={link} disabled={disabled||busy} onChange={e=>{setLink(e.target.value);setReceipt(null);setError('');}} className="catalog-control"/></label>
-                <div className="qr-actions"><button type="button" disabled={disabled||busy||!link} onClick={paste} className="catalog-button">Proveri račun</button><button type="button" disabled={disabled||busy||!link} onClick={()=>{try{apply({fiscalReceiptUrl:fiscalLink(link).url});}catch(e){setError(e.message);}}} className="catalog-button">Sačuvaj samo link u formi</button></div>
+                <label className="block">Nalepi link<input type="url" value={link} disabled={disabled||busy} onChange={e=>{if(life.current.busy)return;life.current.seq++;life.current.decoded=false;clearHint();setLink(e.target.value);setReceipt(null);setError('');setPhase('idle');setDecoded(false);setHint(false);}} className="catalog-control"/></label>
+                <div className="qr-actions"><button type="button" disabled={disabled||busy||!link} onClick={paste} className="catalog-button">Učitaj račun</button><button type="button" disabled={disabled||busy||!link} onClick={()=>{try{apply({fiscalReceiptUrl:fiscalLink(link).url});}catch(e){setError(e.message);}}} className="catalog-button">Sačuvaj samo link u formi</button></div>
                 <div id={region.current} className="qr-reader" aria-label="Pregled QR skenera"/>
                 {(busy||camera||receipt||error)&&<button type="button" onClick={cancel} className="catalog-button">Otkaži QR unos</button>}
-                {busy&&<p role="status">{camera?'Usmerite kameru ka QR kodu.':'Čitanje podataka računa...'}</p>}
+                <p role="status" aria-live="polite" aria-atomic="true">{statusText}</p>
                 {error&&<p role="alert">{error}</p>}
                 {receipt&&<div className="space-y-3">
                     <label className="block">Izaberi jedan proizvod<select value={selected} onChange={e=>{setSelected(e.target.value);setPriceChoice('');}} className="catalog-control"><option value="">Izaberi proizvod</option>{receipt.items.map((i,n)=><option key={n} value={String(n)}>{i.name||'Stavka bez naziva'} · količina {i.quantity??'?'} · jedinično {priceText(i.unit)||'?'} · iznos stavke {priceText(i.line)||'?'}</option>)}</select></label>
