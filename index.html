@@ -184,6 +184,52 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
     });
     const canonical = value => JSON.stringify(value, function(k,v) { if(v && typeof v === 'object' && !Array.isArray(v)) return Object.fromEntries(Object.keys(v).sort().map(key=>[key,v[key]])); return v; });
     window.garancijeFingerprint = canonical;
+    const attachmentNames = (() => {
+        const extensions = {'image/jpeg':['.jpg','.jpeg','.jpe'],'image/png':['.png'],'image/gif':['.gif'],'image/webp':['.webp'],'image/bmp':['.bmp'],'image/avif':['.avif']};
+        const extension = (mime, name = '') => { const allowed=extensions[mime]; if(!allowed)throw Error('Tip slike nije podržan.'); const found=/\.[^.]+$/.exec(name)?.[0]?.toLowerCase(); return allowed.includes(found)?found:allowed[0]; };
+        const base = (name, mime, ext) => { const suffix=ext||extension(mime,name); return String(name||'').toLowerCase().endsWith(suffix)?String(name).slice(0,-suffix.length):String(name||''); };
+        const validateBase = raw => {
+            if(typeof raw!=='string')throw Error('Unesite naziv priloga.');
+            if(/[\p{Cc}\p{Cf}]/u.test(raw))throw Error('Naziv ne sme sadržati kontrolne ili skrivene znakove.');
+            const value=raw.normalize('NFC').trim();
+            if(!value)throw Error('Naziv priloga ne može biti prazan.');
+            if(Array.from(value).length>120)throw Error('Osnovni naziv može imati najviše 120 znakova.');
+            if(/[\p{Cc}\p{Cf}<>:"/\\|?*]/u.test(value)||/[.]$/.test(value)||/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:[.]|$)/i.test(value))throw Error('Naziv sadrži nedozvoljene znakove ili rezervisano ime. Ne koristite / \\ : * ? " < > | ni kontrolne znakove.');
+            if(/\.(jpe?g|jpe|png|gif|webp|bmp|avif)$/i.test(value))throw Error('Unesite osnovni naziv bez ekstenzije; ekstenzija slike je zaključana.');
+            return value;
+        };
+        const full = (raw, mime, originalName, ext) => { const suffix=extension(mime,ext?'original'+ext:originalName);if(ext&&suffix!==ext)throw Error('Ekstenzija ne odgovara originalnom tipu slike.');return validateBase(raw)+suffix; };
+        const validate = a => full(base(a.name,a.mime,a.extension),a.mime,a.name,a.extension);
+        const prepare = (pending, saved, product) => {
+            const kinds=['Račun','Garancija','Ostalo'],max={},used={},count={};
+            for(const kind of kinds){const same=saved.filter(a=>a.kind===kind);max[kind]=same.length;used[kind]=new Set();count[kind]=same.length+pending.filter(a=>a.kind===kind).length;for(const a of same){const match=/-str(\d+)(?:\.[^.]+)$/i.exec(a.name||'');if(match)max[kind]=Math.max(max[kind],Number(match[1]));}}
+            const rows=pending.map(a=>({...a}));
+            for(const a of rows){if(a.autoNamed!==true)continue;const k=kinds.includes(a.kind)?a.kind:'Ostalo';if(a.pageKind===k&&Number.isSafeInteger(a.page)&&a.page>0&&!used[k].has(a.page)){used[k].add(a.page);max[k]=Math.max(max[k],a.page);}else a.page=null;}
+            for(const a of rows){
+                if(a.autoNamed!==true)continue;
+                const k=kinds.includes(a.kind)?a.kind:'Ostalo';if(!a.page){a.page=++max[k];used[k].add(a.page);}a.pageKind=k;a.extension=extension(a.mime,a.extension?'original'+a.extension:a.name);
+                if(a.nameCustom)continue;
+                const clean=String(product||'').normalize('NFC').replace(/[\p{Cc}\p{Cf}<>:"/\\|?*]/gu,' ').replace(/\s+/g,' ').trim().replace(/[. ]+$/g,'')||'Proizvod';
+                const prefix=k+'-',suffix=k==='Račun'&&count[k]===1?'':'-str'+String(a.page).padStart(2,'0');
+                const budget=120-Array.from(prefix+suffix).length,short=Array.from(clean).slice(0,Math.max(1,budget)).join('').trim().replace(/[. ]+$/g,'')||'Proizvod';
+                a.nameTruncated=Array.from(clean).length>budget;a.name=prefix+short+suffix+a.extension;
+            }
+            const groups=new Map();for(const a of rows){if(!a.sha256)continue;const key=a.sha256+':'+a.size+':'+a.mime;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(a);}
+            for(const group of groups.values()){if(group.length<2)continue;const custom=group.filter(a=>a.nameCustom||a.autoNamed!==true),chosen=custom[0]||group[0];for(const a of group)if(a.autoNamed===true&&!a.nameCustom)a.name=chosen.name;}
+            const fields=['name','page','pageKind','extension','nameTruncated'];
+            return rows.every((a,i)=>fields.every(k=>a[k]===pending[i][k]))?pending:rows;
+        };
+        const validatePending = pending => {
+            const names=new Map();return pending.map(a=>{
+                const name=validate(a),key=a.sha256+':'+a.size+':'+a.mime;
+                if(names.has(key)&&names.get(key)!==name)throw Error('Ista originalna slika ima dva različita naziva. Uskladite nazive te slike pre čuvanja.');
+                names.set(key,name);return {...a,name};
+            });
+        };
+        const reselect = (saved,picked) => { if(saved.sha256!==picked.sha256||saved.size!==picked.size||saved.mime!==picked.mime)throw Error('Originalna slika ne odgovara nacrtu.');return {...picked,...saved,original:picked.original,dataUrl:picked.dataUrl}; };
+        return {extension,base,validateBase,full,validate,prepare,validatePending,reselect};
+    })();
+    window.attachmentNames = attachmentNames;
     function createDriveService(options = {}) {
         const send = options.fetch || window.fetch.bind(window), authorize = options.authorize || googleAuthorize;
         const storage = options.storage || window.localStorage, now = options.now || Date.now;
@@ -343,7 +389,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if(j.draft && (j.draft.id !== id) && !(id == null && !j.draft.edit)) throw new Error('Prvo nastavite sačuvani nacrt.');
                     if(j.draft?.sealed) { draft=j.draft; return; }
                     const previous=j.draft;
-                    draft={id:previous?.id || id || 'gp-'+crypto.randomUUID(), edit:previous?.edit ?? !!id, operationId:previous?.operationId || operationId || 'op-'+crypto.randomUUID(), expected:previous?.expected ?? canonical(base ?? null), metadata, attachments, pending:pending.map(({id,name,kind,mime,size,sha256})=>({id,name,kind,mime,size,sha256})), sealed:false};
+                    draft={id:previous?.id || id || 'gp-'+crypto.randomUUID(), edit:previous?.edit ?? !!id, operationId:previous?.operationId || operationId || 'op-'+crypto.randomUUID(), expected:previous?.expected ?? canonical(base ?? null), metadata, attachments, pending:pending.map(({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated})=>({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated})), sealed:false};
                     j.draft=draft;
                 }); return structuredClone(draft);
             },
@@ -384,7 +430,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         }
                         const detail=await json(await request(API+'/files/'+encodeURIComponent(fileId)+'?fields=id,ownedByMe,shared,permissions(type,role,emailAddress)'));
                         if(!detail.ownedByMe || detail.shared!==false || !detail.permissions?.length || detail.permissions.some(p=>p.role!=='owner'||p.type!=='user'||p.emailAddress?.toLowerCase()!==EMAIL)) throw new Error('Privatnost priloga nije potvrđena.');
-                        refs.push({...a,driveFileId:fileId,storage:'google-drive'});
+                        const {autoNamed,nameCustom,page,pageKind,extension,nameTruncated,...reference}=a;
+                        refs.push({...reference,driveFileId:fileId,storage:'google-drive'});
                     }
                     // commit must atomically compare the complete original snapshot and merge only edited fields.
                     await options.metadataStore.commit({id:d.id,userId,operationId:d.operationId,expected:d.expected,metadata:d.metadata,attachments:refs});
@@ -455,7 +502,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         };
 
         const attachmentKinds = ['Račun', 'Garancija', 'Ostalo'];
-        const attachmentRefs = item => (Array.isArray(item?.attachments) ? item.attachments : []).filter(a => a && typeof a.id === 'string' && typeof a.name === 'string').map(a => ({ id: a.id, name: a.name, kind: attachmentKinds.includes(a.kind) ? a.kind : 'Ostalo', mime: textValue(a.mime) || 'image/jpeg', ...(typeof a.driveFileId === 'string' ? {driveFileId:a.driveFileId} : {}), ...(typeof a.sha256 === 'string' ? {sha256:a.sha256} : {}), ...(Number.isFinite(a.size) ? {size:a.size} : {}), ...(typeof a.storage === 'string' ? {storage:a.storage} : {}) }));
+        const attachmentNames = window.attachmentNames;
+        const attachmentRefs = item => (Array.isArray(item?.attachments) ? item.attachments : []).filter(a => a && typeof a.id === 'string' && typeof a.name === 'string').map(a => ({ ...a, id: a.id, name: a.name, kind: attachmentKinds.includes(a.kind) ? a.kind : 'Ostalo', mime: textValue(a.mime) || 'image/jpeg', ...(typeof a.driveFileId === 'string' ? {driveFileId:a.driveFileId} : {}), ...(typeof a.sha256 === 'string' ? {sha256:a.sha256} : {}), ...(Number.isFinite(a.size) ? {size:a.size} : {}), ...(typeof a.storage === 'string' ? {storage:a.storage} : {}) }));
         const legacyAttachments = item => ['receiptImage', 'warrantyImage'].filter(key => safeImage(item?.[key])).map(key => ({ id: key, name: key === 'receiptImage' ? 'Stari račun' : 'Stara garancija', kind: key === 'receiptImage' ? 'Račun' : 'Garancija', legacy: true, dataUrl: item[key] }));
         const imageData = value => typeof value === 'string' && /^data:image\/(jpeg|png|webp|gif);base64,/i.test(value);
         const readAttachment = async file => {
@@ -464,7 +512,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             try {
                 await new Promise((resolve, reject) => { const img = new Image(); img.onload = () => img.width && img.height ? resolve() : reject(new Error()); img.onerror = reject; img.src = dataUrl; });
                 const sha256 = await window.attachmentService.sha256(file);
-                return { id: crypto.randomUUID(), name: file.name, kind: 'Račun', mime: file.type, size: file.size, original: file, sha256, dataUrl };
+                return { id: crypto.randomUUID(), name: file.name, kind: 'Račun', mime: file.type, size: file.size, original: file, sha256, dataUrl, autoNamed:true, nameCustom:false, extension:attachmentNames.extension(file.type,file.name) };
             } catch { URL.revokeObjectURL(dataUrl); throw new Error('Slika nije čitljiva. Original nije poslat.'); }
         };
 
@@ -554,16 +602,19 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             </>;
         }
 
-        function AttachmentList({ attachments, user, onKindChange }) {
+        function AttachmentList({ attachments, user, onKindChange, onNameChange, pendingIds=[] }) {
             const [opened, setOpened] = useState(null);
             return <section className="attachment-list space-y-3" aria-label="Prilozi">
                 {attachments.length === 0 && <p className="text-slate-500">Nema priloga.</p>}
-                {attachments.map(a => <div key={a.id} className="attachment gp-attachment">
+                {attachments.map((a,n) => {
+                    let nameError='';if(onNameChange&&pendingIds.includes(a.id)){try{attachmentNames.validate(a);}catch(e){nameError=e.message;}}
+                    return <div key={a.id} className="attachment gp-attachment">
                     <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>Ponovo izaberite original za nastavak ili proverite već poslati fajl preko Sačuvaj.</p>}
                     {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
+                    {onNameChange&&pendingIds.includes(a.id)&&<div><label>Naziv priloga {n+1} (bez ekstenzije)<input type="text" aria-label={'Naziv priloga '+(n+1)} value={attachmentNames.base(a.name,a.mime,a.extension)} onChange={e=>onNameChange(a.id,e.target.value)} autoComplete="off"/></label><p className="small muted">Ekstenzija je zaključana: {a.extension||attachmentNames.extension(a.mime,a.name)}{a.kind==='Ostalo'?' · Slobodan naziv po vašem izboru.':''}</p>{a.nameTruncated&&<p role="status" className="small muted">Automatski predlog je skraćen na 120 znakova. Pregledajte ceo naziv iznad.</p>}{nameError&&<p role="alert" className="error">{nameError}</p>}</div>}
                     {a.dataUrl && !a.legacy && <img src={a.dataUrl} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
                     <button type="button" aria-label={"Prikaži prilog: " + a.name} disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="attachment-open-button text-blue-700 border rounded-xl px-3 py-2">Prikaži prilog</button>
-                </div>)}
+                </div>;})}
                 {opened && <AttachmentViewer attachment={opened} user={user} onClose={() => setOpened(null)} />}
             </section>;
         }
@@ -574,7 +625,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.25.4';
+        const RELEASE_VERSION = '2026.10.26.1';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -999,15 +1050,19 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return () => { mounted.current = false; for (const url of pendingUrls.current) URL.revokeObjectURL(url); };
             }, []);
             useEffect(() => { onBusy(saving || discarding || processing); return () => onBusy(false); }, [saving, discarding, processing, onBusy]);
+            useEffect(()=>{
+                if(sealed||savingRef.current||disposed.current||discardingRef.current)return;
+                setPending(previous=>attachmentNames.prepare(previous,[...legacy,...attachments],form.name));
+            },[form.name,attachments,pending,sealed]);
             useEffect(() => {
-                if (!mounted.current || disposed.current || discardingRef.current) return;
+                if (!mounted.current || disposed.current || discardingRef.current || savingRef.current || sealed) return;
                 try {
                     if (!draftMatchesRecord(service.getDraft(user.uid), initial)) throw new Error(draftConflictMessage);
                     const {id, ...base} = initial || {}; service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:form,attachments,pending,operationId:draftOperation.current});
                 }
                 catch(e) { setError(e.message); }
-            }, [form,attachments,pending]);
-            const change = (field, value) => { if(!sealed && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
+            }, [form,attachments,pending,sealed]);
+            const change = (field, value) => { if(!sealed && !savingRef.current && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
             const [qrNotice,setQrNotice]=useState('');
             const qrCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
             const applyQR=proposal=>{if(!qrCurrent())return;const result=mergeReceipt(form,proposal);setForm(result.next);const names={name:'naziv',store:'prodavnica',purchaseDate:'datum',purchasePrice:'cena',currency:'valuta',invoiceNumber:'broj računa',fiscalReceiptUrl:'fiskalni link'};setQrNotice(result.kept.length?'Zadržana popunjena polja: '+result.kept.map(k=>names[k]).join(', ')+'.':'Podaci su preneti u formu. Pregledajte ih i dopunite kategoriju i trajanje. Garancija nije sačuvana.');};
@@ -1027,8 +1082,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         if (disposed.current || discardingRef.current) return previous;
                         const result=[...previous];
                         for(const a of good) {
-                            const index=result.findIndex(p=>!p.original && p.sha256===a.sha256 && p.size===a.size);
-                            if(index>=0) result[index]={...a,id:result[index].id,kind:result[index].kind};
+                            const index=result.findIndex(p=>!p.original && p.sha256===a.sha256 && p.size===a.size && p.mime===a.mime);
+                            if(index>=0) result[index]=attachmentNames.reselect(result[index],a);
                             else if(!sealed) result.push(a);
                             else setImageError('Izabrani fajl ne odgovara originalima sačuvanog nacrta.');
                         } return result;
@@ -1041,9 +1096,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 }
             };
             const changeKind = (id, kind) => {
-                if (disposed.current || discardingRef.current) return;
+                if (sealed || savingRef.current || disposed.current || discardingRef.current) return;
                 setAttachments(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
                 setPending(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
+            };
+            const changePendingName = (id, value) => {
+                if(sealed||savingRef.current||disposed.current||discardingRef.current)return;
+                setPending(previous=>previous.map(a=>a.id===id?{...a,name:value+(a.extension||attachmentNames.extension(a.mime,a.name)),nameCustom:true,nameTruncated:false}:a));
             };
 
             const submit = async e => {
@@ -1058,14 +1117,17 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 try { const data=formMetadata(form,initial); if(data.purchasePriceMinor!==undefined&&!/^[A-Z]{3}$/.test(data.currency||''))throw Error('Uz cenu izaberite valutu od tri velika slova, npr. EUR.'); if(data.currency&&!/^[A-Z]{3}$/.test(data.currency))throw Error('Valuta mora imati tri velika slova.'); if(data.invoiceNumber&&data.invoiceNumber.length>200)throw Error('Broj računa je predugačak.'); if(data.fiscalReceiptUrl)fiscalLink(data.fiscalReceiptUrl); } catch(e){setError(e.message);return;}
                 if (malformedAttachments) { setError('Postojeći podaci o prilozima nisu podržani. Čuvanje je zaustavljeno da bi ostali očuvani.'); return; }
                 if (needsService && !service?.saveWarranty) { setError('Servis priloga nije konfigurisan. Nema čuvanja niti slanja priloga. Unos ostaje u formi.'); return; }
+                let readyPending;
+                try{readyPending=sealed?pending:attachmentNames.validatePending(attachmentNames.prepare(pending,[...legacy,...attachments],form.name));}
+                catch(e){setError(e.message);return;}
                 savingRef.current = true; setSaving(true); setError('');
                 try {
                     if (!draftMatchesRecord(service.getDraft(user.uid), initial)) throw new Error(draftConflictMessage);
                     const {id, ...base} = initial || {};
                     const data = formMetadata(form, initial);
-                    service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:data,attachments,pending,operationId:draftOperation.current});
-                    setSealed(true);
-                    await service.saveWarranty({userId:user.uid,newAttachments:pending});
+                    service.stageDraft({userId:user.uid,id:initial?.id || null,base:initial ? base : null,metadata:data,attachments,pending:readyPending,operationId:draftOperation.current});
+                    setPending(readyPending);setSealed(true);
+                    await service.saveWarranty({userId:user.uid,newAttachments:readyPending});
                     if (mounted.current) onSave();
                 } catch (error) {
                     if (mounted.current) setError('Čuvanje nije uspelo. Unos je sačuvan u ovoj formi. ' + error.message);
@@ -1142,7 +1204,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                             </div>
                         </div>
                         {processing && <p role="status">Obrada fotografija...</p>}
-                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} />
+                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} />
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
                         {imageError && <p role="alert" className="text-red-700">{imageError}</p>}
                         </section><div className="form-actions">
