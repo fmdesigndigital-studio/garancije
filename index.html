@@ -119,6 +119,7 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         }
 
         .document-editor { width:min(52rem,calc(100vw - 1rem)); max-height:92dvh; overflow:auto; padding:1rem; border:1px solid #cbd5e1; border-radius:1rem; color:#0f172a; }
+        body.gp-ui dialog.document-editor { padding:1rem; }
         .document-editor h2 { font-size:1.3rem; font-weight:700; }
         .document-editor p { margin:.65rem 0; line-height:1.5; }
         .document-stage { max-height:55dvh; overflow:auto; padding:24px; background:#e2e8f0; border-radius:.75rem; }
@@ -690,7 +691,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if(word(start+2)!==42)throw Error('EXIF zaglavlje nije čitljivo.');
                     const dir=start+long(start+4),count=word(dir);
                     if(count>1024||dir+2+count*12>end)throw Error('EXIF zaglavlje nije čitljivo.');
-                    for(let i=0;i<count;i++){const p=dir+2+i*12;if(word(p)===0x112){if(word(p+2)!==3||long(p+4)!==1)throw Error('Orijentacija fotografije nije podržana.');const value=word(p+8);if(value<1||value>8)throw Error('Orijentacija fotografije nije podržana.');return value;}}
+                    for(let i=0;i<count;i++){const p=dir+2+i*12;if(word(p)===0x112){if(word(p+2)!==3||long(p+4)!==1)throw Error('Orijentacija fotografije nije podržana.');const value=word(p+8);if(value===0)return 1;if(value<1||value>8)throw Error('Orijentacija fotografije nije podržana.');return value;}}
                     return 1;
                 };
                 if(file.type==='image/png'&&b.length>=24&&v.getUint32(0)===0x89504e47&&v.getUint32(4)===0x0d0a1a0a&&v.getUint32(12)===0x49484452){width=v.getUint32(16);height=v.getUint32(20);}
@@ -964,7 +965,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.26.4';
+        const RELEASE_VERSION = '2026.10.26.5';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
