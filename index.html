@@ -625,7 +625,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.26.2';
+        const RELEASE_VERSION = '2026.10.26.3';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -726,6 +726,11 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const [phase,setPhase]=useState('idle'),[decoded,setDecoded]=useState(false),[hint,setHint]=useState(false);
             const life=useRef({active:true,seq:0,busy:false,scanner:null,controller:null,queue:Promise.resolve(),hintTimer:null,decoded:false}),file=useRef(null),region=useRef('fiscal-qr-'+crypto.randomUUID());
             const guards=useRef({disabled,isCurrent});guards.current={disabled,isCurrent};
+            const createQrScanner=()=>{
+                const config={formatsToSupport:[window.Html5QrcodeSupportedFormats.QR_CODE],useBarCodeDetectorIfSupported:true};
+                try{return new window.Html5Qrcode(region.current,config);}
+                catch{return new window.Html5Qrcode(region.current,{...config,useBarCodeDetectorIfSupported:false});}
+            };
             // Camera startup and cleanup share one queue, including cancellation during start().
             const serial=run=>{const l=life.current,task=l.queue.then(run,run);l.queue=task.catch(()=>{});return task;};
             const stop=async scanner=>{if(!scanner)return;if(scanner.isScanning)await scanner.stop();await scanner.clear();if(life.current.scanner===scanner)life.current.scanner=null;};
@@ -755,7 +760,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 try{
                     const raw=await serial(async()=>{
                         await stop(life.current.scanner);if(!current(seq))return null;
-                        if(!window.Html5Qrcode)throw Error();const scanner=new window.Html5Qrcode(region.current,{formatsToSupport:[window.Html5QrcodeSupportedFormats.QR_CODE],useBarCodeDetectorIfSupported:false});life.current.scanner=scanner;
+                        if(!window.Html5Qrcode)throw Error();const scanner=createQrScanner();life.current.scanner=scanner;
                         try{const raw=await scanner.scanFile(image,false);if(current(seq)){life.current.decoded=true;setDecoded(true);setPhase('decoded');clearHint();setHint(false);}return raw;}finally{await stop(scanner);}
                     });
                     if(current(seq)&&raw!==null)await lookup(raw,seq);else finish(seq);
@@ -766,7 +771,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 try{
                     await serial(async()=>{
                         await stop(life.current.scanner);if(!current(seq))return;
-                        if(!window.Html5Qrcode)throw Error();const scanner=new window.Html5Qrcode(region.current,{formatsToSupport:[window.Html5QrcodeSupportedFormats.QR_CODE],useBarCodeDetectorIfSupported:false});life.current.scanner=scanner;let detected=false;
+                        if(!window.Html5Qrcode)throw Error();const scanner=createQrScanner();life.current.scanner=scanner;let detected=false;
                         try{
                             await scanner.start({facingMode:'environment'},{fps:8,qrbox:fiscalQrBox},raw=>{
                                 if(detected||!current(seq)){if(life.current.seq===seq&&!current(seq))cancel();return;}detected=true;life.current.decoded=true;clearHint();setHint(false);setDecoded(true);setPhase('decoded');
