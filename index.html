@@ -240,16 +240,16 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
    tx.delete(ref);return {deleted:true};
   });
  },
- async commit({id,userId,operationId,expected,metadata,attachments}) {
-  const d=window.firebaseDeps; if(d.auth.currentUser?.uid!==userId) throw Error('Nalog se promenio.');
+ async commit({id,userId,operationId,expected,metadata,attachments,isCurrent}) {
+  const d=window.firebaseDeps;const check=()=>{if(d.auth.currentUser?.uid!==userId||isCurrent?.()===false)throw Error('Nalog ili pokušaj čuvanja se promenio.');};check();
   const ref=d.doc(d.db,'artifacts',d.appId,'users',userId,'warranties',id);
   return d.runTransaction(d.db,async tx=>{
-   const snapshot=await tx.get(ref),current=snapshot.exists()?snapshot.data():null;
+   check();const snapshot=await tx.get(ref);check();const current=snapshot.exists()?snapshot.data():null;
    if(current?._attachmentDeletion)throw Error('Brisanje ove garancije je započeto. Nema novog čuvanja.');
    if(current?.lastOperation===operationId)return;
    if(window.garancijeFingerprint(current)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je očuvan.');
    const safe=Object.fromEntries(['name','category','purchaseDate','baseMonths','extendedMonths','store','description','purchasePriceMinor','currency','invoiceNumber','fiscalReceiptUrl'].map(k=>[k,metadata[k]]).filter(([,v])=>v!==undefined));
-   tx.set(ref,{...safe,attachments,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
+   check();tx.set(ref,{...safe,attachments,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
   });
  }
 }};
@@ -402,7 +402,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         const listeners = new Set();
         const notify = () => { for (const fn of listeners) fn(); };
         const expiredMessage = 'Drive sesija je istekla. Ponovo povežite Drive; nacrt je očuvan.';
-        const disconnect = (reason = '') => { generation++; connecting = null; clearTimeout(timer); token = null; deadline = 0; account = null; sessionUid = null; forgetSession(); state = reason ? 'expired' : 'disconnected'; message = reason; notify(); };
+        const disconnect = (reason = '') => { generation++;for(const controller of inFlight)controller.abort(); connecting = null; clearTimeout(timer); token = null; deadline = 0; account = null; sessionUid = null; forgetSession(); state = reason ? 'expired' : 'disconnected'; message = reason; notify(); };
         const needToken = () => { if (!token || now() >= deadline) { disconnect(expiredMessage); throw new Error(message); } };
         const assertUser = uid => { const user = getUser(); if (!user || user.uid !== uid || user.email?.toLowerCase() !== EMAIL) throw new Error('Prijavljeni nalog nije dozvoljeni nalog za ovaj Drive.'); };
         const request = async (url, init = {}, checkingAccount = false) => {
@@ -419,6 +419,60 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             if (response.status === 401) { disconnect('Drive pristup je istekao ili opozvan. Ponovo povežite Drive; nacrt je očuvan.'); throw new Error(message); }
             return response;
         };
+
+        const waits={oauth:120000,metadata:30000,download:120000,upload:180000,read:30000,commit:60000};
+        if(options.simulated&&options.timeouts)for(const key of Object.keys(waits))if(Number.isFinite(options.timeouts[key])&&options.timeouts[key]>0)waits[key]=options.timeouts[key];
+        const inFlight=new Set(), pendingCommits=new Map();
+        const operationError=(code,text,uncertain=false)=>Object.assign(Error(text),{code,uncertain});
+        const aborted=()=>new DOMException('Čekanje je prekinuto. Nacrt je očuvan.','AbortError');
+        // Bound one action, never let an expired Save workflow continue to its next write.
+        const bounded=(task,{ms,signal,current,abort,code='REQUEST_TIMEOUT',text='Zahtev je trajao predugo. Pokušajte ponovo; nacrt je očuvan.',uncertain=false})=>new Promise((resolve,reject)=>{
+            let done=false,timer;
+            const finish=(fn,value)=>{if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',cancel);fn(value);};
+            const check=()=>{if(done||signal?.aborted)throw aborted();if(current?.()===false)throw aborted();};
+            const cancel=()=>finish(reject,aborted());
+            if(signal?.aborted){cancel();return;}
+            signal?.addEventListener('abort',cancel,{once:true});
+            timer=setTimeout(()=>{finish(reject,operationError(code,text,uncertain));abort?.();},ms);
+            Promise.resolve().then(()=>{check();return task(check);}).then(value=>{try{check();finish(resolve,value);}catch(error){finish(reject,error);}},error=>finish(reject,error));
+        });
+        const ordinaryRequest=async(url,init={},consume=json,{ms=waits.metadata,checkingAccount=false,signal,current}={})=>{
+            const controller=new AbortController(),attempt=generation,credential=token;
+            const cancel=()=>controller.abort();signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)cancel();
+            inFlight.add(controller);
+            const valid=()=>{
+                if(attempt!==generation||credential!==token)throw aborted();
+                assertUser(sessionUid);needToken();return current?.()!==false;
+            };
+            try{return await bounded(async check=>{const response=await request(url,{...init,signal:controller.signal},checkingAccount);check();const value=await consume(response);check();return value;},{ms,signal:controller.signal,current:valid,abort:cancel});}
+            catch(error){controller.abort();throw error;}
+            finally{inFlight.delete(controller);signal?.removeEventListener('abort',cancel);}
+        };
+        const draftCurrent=(uid,d,control={})=>{
+            assertUser(uid);const live=journal().draft;
+            if(!live||live.id!==d.id||live.operationId!==d.operationId||draftRevision(live)!==draftRevision(d))throw staleDraft();
+            if(control.signal?.aborted||control.isCurrent?.()===false)throw aborted();
+            return true;
+        };
+        const readMetadata=(id,uid,current)=>bounded(async check=>{const value=await options.metadataStore.read(id,uid);check();return value;},{ms:waits.read,current:()=>{assertUser(uid);return current?.()!==false;},text:'Potvrda podataka nije stigla za 30 sekundi. Nacrt je očuvan; pokušajte ponovo.'});
+        const commitKey=(uid,operationId)=>JSON.stringify([uid,operationId]);
+        const commitPending=()=>operationError('COMMIT_PENDING','Prethodna potvrda još čeka odgovor. Proverava se ista operacija; novi upis nije pokrenut.',true);
+        const commitMetadata=async(args,current,signal)=>{
+            const key=commitKey(args.userId,args.operationId);if(pendingCommits.get(key)?.pending)throw commitPending();
+            const entry={active:true,pending:true};pendingCommits.set(key,entry);
+            const valid=()=>{if(!entry.active)throw aborted();return current();};
+            // A non-waiting lease prevents a second tab starting another live SDK commit.
+            entry.promise=new Promise((resolve,reject)=>{
+                navigator.locks.request(namespace+':commit:'+key,{ifAvailable:true},async lease=>{
+                    if(!lease){reject(commitPending());return;}
+                    try{valid();resolve(await options.metadataStore.commit({...args,isCurrent:valid}));}
+                    catch(error){reject(error);}
+                }).catch(reject).finally(()=>{entry.pending=false;if(pendingCommits.get(key)===entry)pendingCommits.delete(key);});
+            });
+            try{return await bounded(()=>entry.promise,{ms:waits.commit,signal,current:valid,code:'COMMIT_TIMEOUT',text:'Potvrda čuvanja nije stigla za 60 sekundi. Ishod još nije poznat; nacrt i ista operacija su očuvani.',uncertain:true});}
+            catch(error){entry.active=false;error.uncertain=true;throw error;}
+        };
+
         const connected = (attempt, user, remember) => {
             if (attempt !== generation) return;
             assertUser(user.uid); needToken();
@@ -437,7 +491,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             } catch { forgetSession(); return; }
             const attempt = ++generation; connecting = attempt; token = saved.accessToken; deadline = saved.expiresAt; sessionUid = user.uid; account = null; state = 'connecting'; message = ''; notify();
             try {
-                const about = await json(await request(API + '/about?fields=user(emailAddress)', {}, true)); if (attempt !== generation) return;
+                const about = await ordinaryRequest(API + '/about?fields=user(emailAddress)', {}, json,{checkingAccount:true}); if (attempt !== generation) return;
                 if (about.user?.emailAddress?.toLowerCase() !== EMAIL || getUser()?.uid !== user.uid) throw new Error();
                 connected(attempt, user, false);
             } catch { if (attempt === generation) { disconnect(); state = 'error'; message = 'Drive veza nije obnovljena. Povežite Drive ponovo; nacrt je očuvan.'; notify(); } }
@@ -459,16 +513,17 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             if (navigator.locks) return navigator.locks.request(namespace, fn);
             throw new Error('Pregledač ne podržava bezbedno zaključavanje upisa. Drive upis je blokiran.');
         };
-        const folderInfo = async id => {
-            const file = await json(await request(API + '/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType,parents,trashed,ownedByMe,permissions(type,role,emailAddress),appProperties'));
+        const folderInfo = async (id,control) => {
+            const file = await ordinaryRequest(API + '/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType,parents,trashed,ownedByMe,permissions(type,role,emailAddress),appProperties',{},json,control);
             if (file.trashed || file.mimeType !== 'application/vnd.google-apps.folder' || !file.ownedByMe || !file.permissions?.length || file.permissions.some(p => p.type !== 'user' || p.role !== 'owner' || p.emailAddress?.toLowerCase() !== EMAIL)) throw new Error('Privatnost ili vlasništvo foldera nisu potvrđeni. Nema daljeg kreiranja.');
             return file;
         };
-        const getFile = async id => { const response = await request(API + '/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType,size,parents,appProperties,trashed'); return response.status === 404 ? null : json(response); };
-        const reserve = async key => {
+        const getFile = (id,control) => ordinaryRequest(API + '/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType,size,parents,appProperties,trashed',{},async response=>{if(response.status===404){await response.arrayBuffer();return null;}return json(response);},control);
+        const reserve = async (key,control) => {
             const saved = journal().jobs[key]; if (saved) return saved;
-            const result = await json(await request(API + '/files/generateIds?count=1&space=drive&type=files'));
+            const result = await ordinaryRequest(API + '/files/generateIds?count=1&space=drive&type=files',{},json,control);
             if (!result.ids?.[0]) throw new Error('Drive ID nije dobijen.');
+            if(control?.signal?.aborted||control?.current?.()===false)throw aborted();
             const job = { id: result.ids[0], state: 'reserved' };
             mutateJournal(j => { j.jobs[key] = job; }); // Durable BEFORE any create/upload.
             return job;
@@ -477,28 +532,27 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             if (!remote || remote.trashed || remote.appProperties?.operation !== props.operation || (props.sha256 && remote.appProperties?.sha256 !== props.sha256) || (parent && !remote.parents?.includes(parent)) || (size != null && Number(remote.size) !== size)) throw new Error('Postojeći Drive fajl ne odgovara operaciji. Nema prepisivanja ili automatskog brisanja.');
             return remote.id;
         };
-        const ensureFile = async (key, metadata, blob) => {
-            const job = await reserve(key), props = { app: 'garancije-pro', operation: key, ...(blob ? { sha256: await sha256(blob) } : {}) };
+        const ensureFile = async (key, metadata, blob, control) => {
+            const job = await reserve(key,control), props = { app: 'garancije-pro', operation: key, ...(blob ? { sha256: await sha256(blob) } : {}) };
             const check = remote => verify(remote, props, metadata.parents?.[0], blob?.size);
-            const existing = await getFile(job.id); if (existing) { check(existing); mutateJournal(j => { j.jobs[key].state = 'confirmed'; }); return job.id; }
+            const existing = await getFile(job.id,control);if(control?.signal?.aborted||control?.current?.()===false)throw aborted(); if (existing) { check(existing); mutateJournal(j => { j.jobs[key].state = 'confirmed'; }); return job.id; }
             mutateJournal(j => { j.jobs[key].state = 'uncertain'; });
             try {
                 const body = { ...metadata, id: job.id, appProperties: props };
-                let response;
+                const uploadControl={...control,ms:waits.upload};
                 if (blob) {
-                    response = await request(UPLOAD + '?uploadType=resumable', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Upload-Content-Type': blob.type, 'X-Upload-Content-Length': String(blob.size) }, body: JSON.stringify(body) });
-                    if (response.status !== 409) {
-                        if (!response.ok) await json(response);
-                        const location = response.headers.get('Location'); if (!location) throw new Error('Upload sesija nije potvrđena.');
-                        response = await request(location, { method: 'PUT', headers: { 'Content-Type': blob.type }, body: blob });
-                    }
-                } else response = await request(API + '/files', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-                if (!response.ok && response.status !== 409) await json(response);
-                check(await getFile(job.id));
+                    const location=await ordinaryRequest(UPLOAD + '?uploadType=resumable', { method:'POST',headers:{'Content-Type':'application/json','X-Upload-Content-Type':blob.type,'X-Upload-Content-Length':String(blob.size)},body:JSON.stringify(body)},async response=>{
+                        if(response.status===409){await response.arrayBuffer();return null;}
+                        if(!response.ok)await json(response);
+                        const value=response.headers.get('Location');if(!value)throw Error('Upload sesija nije potvrđena.');await response.arrayBuffer();return value;
+                    },uploadControl);
+                    if(location)await ordinaryRequest(location,{method:'PUT',headers:{'Content-Type':blob.type},body:blob},async response=>{if(!response.ok&&response.status!==409)await json(response);await response.arrayBuffer();},uploadControl);
+                } else await ordinaryRequest(API + '/files',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},async response=>{if(!response.ok&&response.status!==409)await json(response);await response.arrayBuffer();},control);
+                check(await getFile(job.id,control));
                 mutateJournal(j => { j.jobs[key].state = 'confirmed'; }); return job.id;
             } catch (error) {
                 // Keep the SAME pre-generated ID. Never replace it after a timeout/unknown outcome.
-                throw new Error(error.message + ' Ishod može biti neizvestan; ponovni pokušaj proverava isti Drive ID. Nema automatskog brisanja.');
+                throw operationError(error.code||'UPLOAD_UNCERTAIN',error.message + ' Ishod može biti neizvestan; ponovni pokušaj proverava isti Drive ID. Nema automatskog brisanja.',true);
             }
         };
         const draftRevision = draft => {
@@ -713,17 +767,18 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 if (connecting !== null) return;
                 const user = getUser(); assertUser(user?.uid);
                 const attempt = ++generation; connecting = attempt; clearTimeout(timer); token = null; deadline = 0; account = null; sessionUid = user.uid; forgetSession(); state = 'connecting'; message = ''; notify();
+                const oauthController=new AbortController();inFlight.add(oauthController);
                 try {
-                    const response = await authorize(); if (attempt !== generation) return;
+                    const response = await bounded(()=>authorize(),{ms:waits.oauth,signal:oauthController.signal,current:()=>attempt===generation,code:'OAUTH_TIMEOUT',text:'Povezivanje traje predugo. Zatvorite stari Google prozor pa pokušajte ponovo; nacrt je očuvan.'}); if (attempt !== generation) return;
                     const scopes = new Set(String(response.scope || '').split(/\s+/).filter(Boolean));
                     if (!scopes.has(SCOPE) || [...scopes].some(s => s !== SCOPE)) throw new Error('Google nije odobrio tačno drive.file. Povezivanje je zaustavljeno.');
                     if (typeof response.access_token !== 'string' || !response.access_token || !Number.isFinite(Number(response.expires_in)) || Number(response.expires_in) <= 30) throw new Error('Google token nije važeći.');
                     token = response.access_token; deadline = now() + (Number(response.expires_in) - 30) * 1000;
-                    const about = await json(await request(API + '/about?fields=user(emailAddress)', {}, true)); if (attempt !== generation) return;
+                    const about = await ordinaryRequest(API + '/about?fields=user(emailAddress)', {}, json,{checkingAccount:true}); if (attempt !== generation) return;
                     if (about.user?.emailAddress?.toLowerCase() !== EMAIL || getUser()?.uid !== user.uid) throw new Error('Izabrani Google nalog nije ' + EMAIL + '. Nema čitanja priloga ili upisa.');
                     connected(attempt, user, true);
                 } catch (error) { if (attempt === generation) { disconnect(); state = 'error'; message = error.message; notify(); } }
-                finally { if (connecting === attempt) connecting = null; }
+                finally {inFlight.delete(oauthController); if (connecting === attempt) connecting = null; }
             },
             pendingFingerprint: pending => canonical(pendingMetadata(pending)),
             contentRevision: draftRevision,
@@ -732,7 +787,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     assertUser(userId);const d=journal().draft;
                     if(!d||d.operationId!==operationId)throw staleDraft();checkDraftRevision(d,expectedRevision);
                     if(!await prewriteSafe(d))throw Error('Prethodni upis može imati neizvestan ishod. Nacrt ostaje zaštićen; ponovite istu operaciju.');
-                    const current=await options.metadataStore.read(d.id,userId);assertUser(userId);
+                    const current=await readMetadata(d.id,userId,()=>draftCurrent(userId,d));assertUser(userId);
                     if(canonical(journal().draft)!==canonical(d))throw staleDraft();
                     if(current?.lastOperation===operationId)throw Error('Čuvanje je već potvrđeno. Ponovite isti pokušaj radi završetka oporavka.');
                     return conflictPlan(d,current);
@@ -744,7 +799,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if(!d||d.operationId!==plan?.operationId||canonical(d)!==plan.draftSnapshot)throw staleDraft();
                     checkDraftRevision(d,plan.revision);
                     if(!await prewriteSafe(d))throw Error('Ishod ranijeg upisa nije bezbedno razrešen. Nacrt ostaje zaključan.');
-                    const current=await options.metadataStore.read(d.id,userId);assertUser(userId);
+                    const current=await readMetadata(d.id,userId,()=>draftCurrent(userId,d));assertUser(userId);
                     if(canonical(journal().draft)!==canonical(d))throw staleDraft();
                     if(canonical(current)!==plan.snapshot||current?.lastOperation===d.operationId)throw Error('Zapis se ponovo promenio. Osvežite pregled konflikta; ništa nije prepisano.');
                     const fresh=conflictPlan(d,current);
@@ -835,20 +890,21 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 });
             },
             async stageDraft(args) { return lock(()=>writeDraft(args)); },
-            async checkFolders() {
-                const values=await Promise.all(Object.values(DRIVE_FOLDERS).map(folderInfo));
+            async checkFolders(control) {
+                const values=await Promise.all(Object.values(DRIVE_FOLDERS).map(id=>folderInfo(id,control)));
                 if(values.some((f,i)=>f.id!==Object.values(DRIVE_FOLDERS)[i] || f.name!==['baza-garancije-i-racuni','proizvodi','rezervne-kopije'][i]) || values.slice(1).some(f=>!f.parents?.includes(DRIVE_FOLDERS.root))) throw new Error('Postojeća hijerarhija se ne poklapa. Nema upisa.');
                 return DRIVE_FOLDERS;
             },
-            async load({ userId, id, driveFileId, sha256: expectedHash }) {
-                assertUser(userId); needToken();
-                const response = await request(API + '/files/' + encodeURIComponent(driveFileId || id) + '?alt=media');
-                if (!response.ok) await json(response);
-                const blob = await response.blob(); if (!/^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(blob.type)) throw new Error('Prilog nije podržana slika.');
-                if (expectedHash && await sha256(blob) !== expectedHash) throw new Error('Originalni bajtovi ne odgovaraju sačuvanom hash-u.');
-                return blob;
+            async load({ userId, id, driveFileId, sha256: expectedHash, signal, isCurrent }) {
+                assertUser(userId);needToken();
+                return ordinaryRequest(API+'/files/'+encodeURIComponent(driveFileId||id)+'?alt=media',{},async response=>{
+                    if(!response.ok)await json(response);
+                    const blob=await response.blob();if(!/^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(blob.type))throw Error('Prilog nije podržana slika.');
+                    if(expectedHash&&await sha256(blob)!==expectedHash)throw Error('Originalni bajtovi ne odgovaraju sačuvanom hash-u.');
+                    return blob;
+                },{ms:waits.download,signal,current:()=>{assertUser(userId);return isCurrent?.()!==false;}});
             },
-            async saveWarranty({ userId, newAttachments=[], operationId, expectedRevision }) {
+            async saveWarranty({ userId, newAttachments=[], operationId, expectedRevision, signal, isCurrent }) {
                 api.assertWriteAllowed(userId);
                 if(!options.metadataStore?.read || !options.metadataStore?.commit) throw new Error('Čuvanje nije aktivirano. Nacrt je očuvan.');
                 return lock(async()=>{
@@ -856,9 +912,11 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if(d.operationId!==operationId)throw staleDraft();checkDraftRevision(d,expectedRevision);
                     if(!d.sealed)throw Error('Prvo potvrdite sadržaj nacrta za čuvanje.');
                     mutateJournal(j=>{j.draft.sealed=true;}); d=journal().draft;
-                    const current=await options.metadataStore.read(d.id,userId);
+                    const valid=()=>draftCurrent(userId,d,{signal,isCurrent}),control={signal,current:valid};
+                    valid();const current=await readMetadata(d.id,userId,valid);
                     if(current?._attachmentDeletion){const error=Error('Brisanje ove garancije je započeto. Nacrt je očuvan.');if(await prewriteSafe(d))error.code='DRAFT_CONFLICT_SAFE';throw error;}
                     if(current?.lastOperation===d.operationId) { await cleanPhotos(userId,d); mutateJournal(j=>{if(j.draft?.operationId===d.operationId)j.draft=null;}); return current.attachments || []; }
+                    if(pendingCommits.get(commitKey(userId,d.operationId))?.pending)throw commitPending();
                     if(canonical(current)!==d.expected) {
                         const error=Error('Zapis je u međuvremenu promenjen. Nacrt je očuvan; potrebno je usklađivanje bez prepisivanja.');
                         if(await prewriteSafe(d))error.code='DRAFT_CONFLICT_SAFE';throw error;
@@ -866,26 +924,26 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     const knownIds=new Set((current?.attachments||[]).map(a=>a?.driveFileId).filter(Boolean));
                     if(d.attachments.some(a=>a.driveFileId&&!knownIds.has(a.driveFileId)))throw Error('Nije dozvoljeno dodavanje postojećeg Drive fajla iz drugog zapisa.');
                     const refs=[...d.attachments];
-                    if(d.pending.length) { needToken(); await api.checkFolders();markSavePhase(d,'external'); }
+                    if(d.pending.length) { needToken(); await api.checkFolders(control);valid();markSavePhase(d,'external'); }
                     for(const a of d.pending) {
                         const key=await hashText('upload:'+d.operationId+':'+a.sha256);
                         const job=journal().jobs[key];
-                        const remote=job ? await getFile(job.id) : null;
+                        const remote=job ? await getFile(job.id,control) : null;
                         let fileId;
                         if(remote) { verify(remote,{operation:key,sha256:a.sha256},DRIVE_FOLDERS.products,a.size); fileId=job.id; }
                         else {
                             const picked=newAttachments.find(p=>p.id===a.id && p.sha256===a.sha256);
                             if(!(picked?.original instanceof Blob) || picked.original.size!==a.size || await sha256(picked.original)!==a.sha256) throw new Error('Ponovo izaberite original: '+a.name+'. Hash mora odgovarati nacrtu.');
-                            fileId=await ensureFile(key,{name:a.name,mimeType:a.mime,parents:[DRIVE_FOLDERS.products]},picked.original);
+                            valid();fileId=await ensureFile(key,{name:a.name,mimeType:a.mime,parents:[DRIVE_FOLDERS.products]},picked.original,control);
                         }
-                        const detail=await json(await request(API+'/files/'+encodeURIComponent(fileId)+'?fields=id,ownedByMe,shared,permissions(type,role,emailAddress)'));
+                        const detail=await ordinaryRequest(API+'/files/'+encodeURIComponent(fileId)+'?fields=id,ownedByMe,shared,permissions(type,role,emailAddress)',{},json,control);
                         if(!detail.ownedByMe || detail.shared!==false || !detail.permissions?.length || detail.permissions.some(p=>p.role!=='owner'||p.type!=='user'||p.emailAddress?.toLowerCase()!==EMAIL)) throw new Error('Privatnost priloga nije potvrđena.');
                         const {autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto,thumbnailUrl,...reference}=a;
                         refs.push({...reference,driveFileId:fileId,storage:'google-drive'});
                     }
                     // commit must atomically compare the complete original snapshot and merge only edited fields.
-                    markSavePhase(d,'commit');
-                    await options.metadataStore.commit({id:d.id,userId,operationId:d.operationId,expected:d.expected,metadata:d.metadata,attachments:refs});
+                    valid();markSavePhase(d,'commit');
+                    await commitMetadata({id:d.id,userId,operationId:d.operationId,expected:d.expected,metadata:d.metadata,attachments:refs},valid,signal);valid();
                     await cleanPhotos(userId,d);
                     mutateJournal(j=>{if(j.draft?.operationId===d.operationId)j.draft=null;});
                     return refs;
@@ -1311,16 +1369,16 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return () => { el.removeEventListener('keydown',trap);el.close(); host.remove();if(trigger?.isConnected)trigger.focus({preventScroll:true}); };
             }, []);
             useEffect(() => {
-                let active = true, objectUrl; setSrc(null); setPrintSize(null); setError('');
+                let active = true, objectUrl;const controller=new AbortController(); setSrc(null); setPrintSize(null); setError('');
                 (async () => {
                     try {
-                        const value = attachment.dataUrl || await window.attachmentService?.load({ userId: user.uid, ...attachment });
+                        const value = attachment.dataUrl || await window.attachmentService?.load({ userId: user.uid, ...attachment,signal:controller.signal,isCurrent:()=>active });
                         const display = value instanceof Blob ? (objectUrl = URL.createObjectURL(value)) : value;
                         if (!(attachment.legacy ? safeImage(display) : (imageData(display) || (typeof display === 'string' && display.startsWith('blob:'))))) throw new Error();
                         if (active) setSrc(display); else if (objectUrl) URL.revokeObjectURL(objectUrl);
                     } catch (error) { if (active) setError('Prilog nije učitan. ' + error.message); }
                 })();
-                return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+                return () => { active = false;controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
             }, [attachment, user.uid, attempt]);
             const printReady = !!src && printSize?.src === src && !error;
             const printAttachment = () => {
@@ -1393,7 +1451,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.27.3';
+        const RELEASE_VERSION = '2026.10.27.4';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2067,13 +2125,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     await service.stageDraft({userId:user.uid,id:initial?.id||null,base:initial?base:null,metadata:data,attachments,pending:readyPending,operationId:draftOperation.current,expectedPending:()=>draftPending.current,expectedRevision:()=>draftRevisionRef.current,isCurrent:()=>mounted.current&&!disposed.current&&!discardingRef.current&&!blocked(),onStaged:acknowledgeDraft,seal:true,allowSealed:sealed});
                     if(!mounted.current||disposed.current)return;
                     setPending(readyPending);setSealed(true);
-                    await service.saveWarranty({userId:user.uid,newAttachments:readyPending,operationId:draftOperation.current,expectedRevision:()=>draftRevisionRef.current});
+                    await service.saveWarranty({userId:user.uid,newAttachments:readyPending,operationId:draftOperation.current,expectedRevision:()=>draftRevisionRef.current,isCurrent:()=>mounted.current&&!disposed.current&&!discardingRef.current});
                     if (mounted.current) onSave();
                 } catch (error) {
                     if (mounted.current) {
                         handleDraftError(error);
                         if(error.code==='DRAFT_CONFLICT_SAFE'){setSafeConflict(true);await inspectConflict();}
-                        else setError('Čuvanje nije uspelo. Unos je sačuvan u ovoj formi. '+error.message);
+                        else {let uncertain=!!error.uncertain;try{uncertain=uncertain||['external','commit'].includes(service.getDraft(user.uid)?.saveState?.phase);}catch{uncertain=true;}setError((uncertain?'Čuvanje još nije potvrđeno. Nacrt i ista operacija su očuvani. ':'Čuvanje nije uspelo. Unos je sačuvan u ovoj formi. ')+error.message);}
                     }
                 } finally {
                     savingRef.current = false;
