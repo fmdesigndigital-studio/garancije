@@ -880,7 +880,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         }
                         const detail=await json(await request(API+'/files/'+encodeURIComponent(fileId)+'?fields=id,ownedByMe,shared,permissions(type,role,emailAddress)'));
                         if(!detail.ownedByMe || detail.shared!==false || !detail.permissions?.length || detail.permissions.some(p=>p.role!=='owner'||p.type!=='user'||p.emailAddress?.toLowerCase()!==EMAIL)) throw new Error('Privatnost priloga nije potvrđena.');
-                        const {autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto,...reference}=a;
+                        const {autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto,thumbnailUrl,...reference}=a;
                         refs.push({...reference,driveFileId:fileId,storage:'google-drive'});
                     }
                     // commit must atomically compare the complete original snapshot and merge only edited fields.
@@ -968,6 +968,102 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             } catch { URL.revokeObjectURL(dataUrl); throw new Error('Slika nije čitljiva. Original nije poslat.'); }
         };
 
+
+        // Gallery previews are disposable; the original bytes alone are hashed and uploaded.
+        const galleryImages = (() => {
+            const MiB=1024*1024, limits={selection:5,file:10*MiB,batch:30*MiB,count:10,total:50*MiB,pixels:24000000,edge:20000,preview:512};
+            const check=signal=>{if(signal?.aborted)throw new DOMException('Priprema je otkazana.','AbortError');};
+            const supported=file=>{if(!/^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(file.type))throw Error('Izaberite PNG, JPEG, GIF, WebP, BMP ili AVIF sliku.');if(!Number.isSafeInteger(file.size)||file.size<1)throw Error('Slika je prazna ili nema ispravnu veličinu.');};
+            const dimensions=(width,height)=>{
+                if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<1||height<1)throw Error('Dimenzije slike nisu čitljive.');
+                if(width*height>limits.pixels||Math.max(width,height)>limits.edge)throw Error('Slika prelazi 24 megapiksela ili 20.000 px po strani. Izaberite manju sliku; original nije izmenjen.');
+            };
+            const preflight=async(file,signal)=>{
+                if(!/^image\/(jpeg|png)$/i.test(file.type))return false;
+                const v=new DataView(await file.slice(0,1048576).arrayBuffer());check(signal);
+                if(file.type.toLowerCase()==='image/png'){
+                    if(v.byteLength<33||v.getUint32(0)!==0x89504e47||v.getUint32(4)!==0x0d0a1a0a||v.getUint32(8)!==13||v.getUint32(12)!==0x49484452)throw Error('PNG zaglavlje nije čitljivo.');
+                    dimensions(v.getUint32(16),v.getUint32(20));return true;
+                }
+                if(v.byteLength<4||v.getUint16(0)!==0xffd8)throw Error('JPEG zaglavlje nije čitljivo.');
+                let p=2;
+                while(p+1<v.byteLength){
+                    if(v.getUint8(p++)!==255)throw Error('JPEG zaglavlje nije čitljivo.');
+                    while(p<v.byteLength&&v.getUint8(p)===255)p++;
+                    if(p>=v.byteLength)break;
+                    const marker=v.getUint8(p++);
+                    if(marker===0xda||marker===0xd9)break;
+                    if(marker===1||(marker>=0xd0&&marker<=0xd8))continue;
+                    if(p+2>v.byteLength)break;
+                    const length=v.getUint16(p),end=p+length;
+                    if(length<2)throw Error('JPEG zaglavlje nije čitljivo.');
+                    if(end>v.byteLength)break;
+                    if([0xc0,0xc1,0xc2,0xc3,0xc5,0xc6,0xc7,0xc9,0xca,0xcb,0xcd,0xce,0xcf].includes(marker)){
+                        if(length<8)throw Error('JPEG dimenzije nisu čitljive.');
+                        dimensions(v.getUint16(p+5),v.getUint16(p+3));return true;
+                    }
+                    p=end;
+                }
+                throw Error('JPEG dimenzije nisu dostupne u prvih 1 MiB. Izaberite drugu sliku.');
+            };
+            const key=a=>[a.sha256,a.size,a.mime].join(':');
+            const plan=async(files,pending,signal)=>{
+                if(files.length>limits.selection)throw Error('Izaberite najviše 5 slika odjednom. Prethodni prilozi ostaju.');
+                const rows=[],seen=new Set();let bytes=0;
+                for(const file of files){
+                    check(signal);supported(file);
+                    const candidates=pending.filter(a=>a.size===file.size&&a.mime===file.type);
+                    if(file.size>limits.file&&!candidates.length)throw Error('Nova slika može imati najviše 10 MiB. Prethodni prilozi ostaju.');
+                    const sha256=await window.attachmentService.sha256(file);check(signal);
+                    const identity={sha256,size:file.size,mime:file.type},matches=pending.filter(a=>key(a)===key(identity));
+                    if(!matches.length&&file.size>limits.file)throw Error('Nova slika može imati najviše 10 MiB. Original ne odgovara postojećem nacrtu.');
+                    if(seen.has(key(identity)))continue;seen.add(key(identity));
+                    if(!matches.length)bytes+=file.size;
+                    rows.push({file,sha256,matches});
+                }
+                if(bytes>limits.batch)throw Error('Novi izbor može imati ukupno najviše 30 MiB. Prethodni prilozi ostaju.');
+                const gallery=pending.filter(a=>a.documentPhoto!==true),fresh=rows.filter(a=>!a.matches.length);
+                if(fresh.length&&gallery.some(a=>!Number.isSafeInteger(a.size)||a.size<1))throw Error('Veličina postojećih priloga nacrta nije potvrđena. Ponovni izbor istih originala ostaje dostupan.');
+                if(fresh.length&&(gallery.length+fresh.length>limits.count||gallery.reduce((n,a)=>n+a.size,0)+bytes>limits.total))throw Error('Nacrt može imati najviše 10 novih slika iz galerije i ukupno 50 MiB njihovih originala. Ponovni izbor istih originala ostaje dostupan.');
+                return rows;
+            };
+            const release=a=>{for(const url of [a?.dataUrl,a?.thumbnailUrl])if(url)URL.revokeObjectURL(url);};
+            const read=async(file,{signal,sha256,reselect=false}={})=>{
+                check(signal);supported(file);let decodeUrl,image,canvas,dataUrl,thumbnailUrl;
+                try{
+                    // Old draft originals may exceed new intake limits. Reattach exact bytes without decoding them.
+                    if(!reselect||file.size<=limits.file){
+                        await preflight(file,signal);check(signal);
+                        decodeUrl=URL.createObjectURL(file);
+                        image=await new Promise((resolve,reject)=>{
+                            const img=new Image(),cancel=()=>{img.onload=img.onerror=null;img.src='';reject(new DOMException('Priprema je otkazana.','AbortError'));};
+                            const finish=fn=>{signal?.removeEventListener('abort',cancel);img.onload=img.onerror=null;fn();};
+                            signal?.addEventListener('abort',cancel,{once:true});
+                            img.onload=()=>finish(()=>resolve(img));img.onerror=()=>finish(()=>reject(Error('Slika nije čitljiva.')));
+                            img.src=decodeUrl;
+                        });
+                        check(signal);dimensions(image.naturalWidth,image.naturalHeight);
+                        const scale=Math.min(1,limits.preview/Math.max(image.naturalWidth,image.naturalHeight));
+                        canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.naturalWidth*scale));canvas.height=Math.max(1,Math.round(image.naturalHeight*scale));
+                        const context=canvas.getContext('2d');if(!context)throw Error('Mali pregled nije dostupan.');
+                        context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(image,0,0,canvas.width,canvas.height);
+                        const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.75));check(signal);
+                        if(!blob)throw Error('Mali pregled nije pripremljen.');
+                        thumbnailUrl=URL.createObjectURL(blob);
+                    }
+                }catch(error){
+                    if(error.name==='AbortError'||!reselect){if(thumbnailUrl)URL.revokeObjectURL(thumbnailUrl);throw error;}
+                    // An exact known original can recover its draft even when a fresh preview is not supported.
+                }finally{
+                    if(image)image.src='';if(decodeUrl)URL.revokeObjectURL(decodeUrl);if(canvas){canvas.width=0;canvas.height=0;}
+                }
+                try{
+                    check(signal);dataUrl=URL.createObjectURL(file);
+                    return {id:crypto.randomUUID(),name:file.name,kind:'Račun',mime:file.type,size:file.size,original:file,sha256,dataUrl,thumbnailUrl:thumbnailUrl||null,autoNamed:true,nameCustom:false,extension:attachmentNames.extension(file.type,file.name)};
+                }catch(error){release({dataUrl,thumbnailUrl});throw error;}
+            };
+            return {limits,plan,read,release,preflight,dimensions};
+        })();
 
         // All coordinates refer to the browser-oriented image; originals are never rewritten.
         const documentImage = (() => {
@@ -1278,12 +1374,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             return <section className="attachment-list space-y-3" aria-label="Prilozi">
                 {attachments.length === 0 && <p className="text-slate-500">Nema priloga.</p>}
                 {attachments.map((a,n) => {
+                    const thumbnail=a.thumbnailUrl===undefined?a.dataUrl:a.thumbnailUrl;
                     let nameError='';if(onNameChange&&pendingIds.includes(a.id)){try{attachmentNames.validate(a);}catch(e){nameError=e.message;}}
                     return <div key={a.id} className="attachment gp-attachment">
                     <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>{a.documentPhoto?'Izaberite tačnu konačnu fotografiju za nastavak. Original pre obrade ne odgovara obrađenoj slici. Već poslati fajl proverite preko Sačuvaj.':'Ponovo izaberite original za nastavak ili proverite već poslati fajl preko Sačuvaj.'}</p>}
                     {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
                     {onNameChange&&pendingIds.includes(a.id)&&<div><label>Naziv priloga {n+1} (bez ekstenzije)<input type="text" aria-label={'Naziv priloga '+(n+1)} value={attachmentNames.base(a.name,a.mime,a.extension)} onChange={e=>onNameChange(a.id,e.target.value)} autoComplete="off"/></label><p className="small muted">Ekstenzija je zaključana: {a.extension||attachmentNames.extension(a.mime,a.name)}{a.kind==='Ostalo'?' · Slobodan naziv po vašem izboru.':''}</p>{a.nameTruncated&&<p role="status" className="small muted">Automatski predlog je skraćen na 120 znakova. Pregledajte ceo naziv iznad.</p>}{nameError&&<p role="alert" className="error">{nameError}</p>}</div>}
-                    {a.dataUrl && !a.legacy && <img src={a.dataUrl} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
+                    {thumbnail && !a.legacy && <img src={thumbnail} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
                     <button type="button" aria-label={"Prikaži prilog: " + a.name} disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="attachment-open-button text-blue-700 border rounded-xl px-3 py-2">Prikaži prilog</button>
                 </div>;})}
                 {opened && <AttachmentViewer attachment={opened} user={user} onClose={() => setOpened(null)} />}
@@ -1296,7 +1393,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.27.2';
+        const RELEASE_VERSION = '2026.10.27.3';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -1737,7 +1834,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             }));
             const [attachments, setAttachments] = useState(() => restored.current?.attachments || attachmentRefs(initial));
             const [pending, setPending] = useState(() => restored.current?.pending || []);
-            const pendingUrls = useRef(new Set());
+            const pendingUrls = useRef(new Set()), galleryUrls=useRef(new Set()), galleryRun=useRef(null);
+            const [galleryProgress,setGalleryProgress]=useState(null);
             const cameraInput = useRef(null), galleryInput = useRef(null);
 
             const legacy = legacyAttachments(initial);
@@ -1755,8 +1853,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const mounted = useRef(true);
             useEffect(() => {
                 mounted.current = true;
-                return () => { mounted.current = false; for (const url of pendingUrls.current) URL.revokeObjectURL(url); };
+                return () => { mounted.current = false;galleryRun.current?.abort(); for (const url of pendingUrls.current) URL.revokeObjectURL(url); };
             }, []);
+            useEffect(()=>()=>{galleryRun.current?.abort();},[user.uid,initial?.id]);
+            useEffect(()=>{
+                const kept=new Set(pending.flatMap(a=>[a.dataUrl,a.thumbnailUrl]).filter(Boolean));
+                for(const url of galleryUrls.current)if(!kept.has(url)){URL.revokeObjectURL(url);galleryUrls.current.delete(url);pendingUrls.current.delete(url);}
+            }, [pending]);
             useEffect(()=>{
                 if(!recoveringPhotos)return;
                 let cancelled=false;
@@ -1815,7 +1918,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     .catch(e=>{if(current()&&e.name!=='AbortError')handleDraftError(e);})
                     .finally(()=>{if(ticket===stageSequence.current){stagingRef.current=false;if(mounted.current)setStaging(false);}});
                 return()=>{cancelled=true;};
-            },[form,attachments,pending,sealed,stale,conflict,resolving]);
+            },[form,attachments,pending,sealed,stale,conflict,resolving,processing]);
             const change = (field, value) => { if(!sealed && !savingRef.current && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
             const [qrNotice,setQrNotice]=useState('');
             const qrCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&!blocked()&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
@@ -1823,38 +1926,63 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const expiry = calcExp(form.purchaseDate, form.baseMonths, form.extendedMonths);
 
             const handleFile = async e => {
-                if (disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current) return;
-                const files = Array.from(e.target.files); e.target.value = '';
-                if (!files.length) return;
-                processingRef.current++; setProcessing(true); setImageError('');
-                try {
-                    const results = await Promise.allSettled(files.map(readAttachment));
-                    const good = [];
-                    for(const result of results.filter(r=>r.status==='fulfilled')) {
-                        const a=result.value,old=pending.find(p=>!p.original&&p.documentPhoto===true&&p.sha256===a.sha256&&p.size===a.size&&p.mime===a.mime);
-                        if(old) {
-                            try { await service.cacheReselectedDocumentPhoto({userId:user.uid,operationId:draftOperation.current,attachment:{...a,id:old.id}}); }
-                            catch(e) { URL.revokeObjectURL(a.dataUrl);setImageError(e.message);continue; }
+                if(disposed.current||discardingRef.current||savingRef.current||processingRef.current||stagingRef.current||blocked())return;
+                const files=Array.from(e.target.files||[]);e.target.value='';if(!files.length)return;
+                const controller=new AbortController(),operation=draftOperation.current,revision=draftRevisionRef.current;
+                const live=()=>mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!blocked()&&galleryRun.current===controller&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
+                const current=()=>{
+                    if(!live()||controller.signal.aborted)throw new DOMException('Priprema je otkazana.','AbortError');
+                    const d=service.getDraft(user.uid);
+                    if(!d||d.operationId!==operation||!draftMatchesRecord(d,initial)||service.contentRevision(d)!==revision)throw Object.assign(Error('Nacrt je promenjen tokom pripreme. Izbor nije dodat; prethodni prilozi ostaju.'),{code:'DRAFT_STALE'});
+                };
+                const storageChanged=()=>{try{current();}catch{controller.abort();}};
+                galleryRun.current=controller;processingRef.current++;setProcessing(true);setImageError('');setGalleryProgress({index:0,total:files.length});
+                window.addEventListener('storage',storageChanged);
+                const prepared=[];let accepted=false;
+                try{
+                    current();const rows=await galleryImages.plan(files,pending,controller.signal);current();
+                    const next=[...pending],messages=[];
+                    for(let i=0;i<rows.length;i++){
+                        current();setGalleryProgress({index:i+1,total:rows.length});
+                        const row=rows[i],missing=row.matches.filter(a=>!a.original);
+                        if(row.matches.length&&!missing.length)continue;
+                        if(sealed&&!missing.length){messages.push('Izabrani fajl ne odgovara originalima sačuvanog nacrta.');continue;}
+                        let a;
+                        try{
+                            a=await galleryImages.read(row.file,{signal:controller.signal,sha256:row.sha256,reselect:missing.length>0});prepared.push(a);current();
+                            for(const old of missing.filter(a=>a.documentPhoto===true)){
+                                await service.cacheReselectedDocumentPhoto({userId:user.uid,operationId:operation,attachment:{...a,id:old.id}});current();
+                            }
+                            if(missing.length){
+                                for(const old of missing){const index=next.findIndex(p=>p.id===old.id);next[index]={...attachmentNames.reselect(old,a),thumbnailUrl:a.thumbnailUrl};}
+                                if(!a.thumbnailUrl)messages.push('Original je ponovo povezan sa nacrtom bez malog pregleda.');
+                            }else next.push(a);
+                        }catch(error){
+                            if(error.name==='AbortError'||error.code==='DRAFT_STALE')throw error;
+                            if(a){galleryImages.release(a);prepared.splice(prepared.indexOf(a),1);}
+                            messages.push(error.message);
                         }
-                        good.push(a);
+                        await new Promise(resolve=>setTimeout(resolve,0));
                     }
-                    if (!mounted.current || disposed.current || discardingRef.current) { for (const a of good) URL.revokeObjectURL(a.dataUrl); return; }
-                    for (const a of good) pendingUrls.current.add(a.dataUrl);
-                    setPending(previous => {
-                        if (disposed.current || discardingRef.current) return previous;
-                        const result=[...previous];
-                        for(const a of good) {
-                            const index=result.findIndex(p=>!p.original && p.sha256===a.sha256 && p.size===a.size && p.mime===a.mime);
-                            if(index>=0) result[index]=attachmentNames.reselect(result[index],a);
-                            else if(!sealed) result.push(a);
-                            else setImageError('Izabrani fajl ne odgovara originalima sačuvanog nacrta.');
-                        } return result;
-                    });
-                    const failed = results.filter(r => r.status === 'rejected').length;
-                    if (failed) setImageError(failed + ' slika nije obrađeno. Prethodni prilozi su sačuvani; izaberite neuspele slike ponovo.');
-                } finally {
-                    processingRef.current--;
-                    if (mounted.current) setProcessing(processingRef.current > 0);
+                    current();
+                    for(const a of prepared)for(const url of [a.dataUrl,a.thumbnailUrl])if(url){pendingUrls.current.add(url);galleryUrls.current.add(url);}
+                    setPending(previous=>{
+                        const existing=new Map(pending.map(a=>[a.id,a])),preparedById=new Map(next.filter(a=>existing.has(a.id)&&a.original!==existing.get(a.id).original).map(a=>[a.id,a]));
+                        return [...previous.map(a=>{const picked=preparedById.get(a.id);return picked&&a.sha256===picked.sha256&&a.size===picked.size&&a.mime===picked.mime?{...a,original:picked.original,dataUrl:picked.dataUrl,thumbnailUrl:picked.thumbnailUrl}:a;}),...next.filter(a=>!existing.has(a.id))];
+                    });accepted=true;
+                    if(messages.length)setImageError(messages.join(' '));
+                }catch(error){
+                    if(live()){
+                        if(error.code==='DRAFT_STALE')handleDraftError(error);
+                        else if(error.name==='AbortError'){
+                            try{const d=service.getDraft(user.uid);if(d?.operationId===operation&&service.contentRevision(d)!==revision)markStale();}catch{}
+                            setImageError('Priprema je prekinuta. Novi izbor nije dodat; prethodni prilozi ostaju.');
+                        }else setImageError(error.message);
+                    }
+                }finally{
+                    window.removeEventListener('storage',storageChanged);
+                    if(!accepted)for(const a of prepared)galleryImages.release(a);
+                    if(galleryRun.current===controller){galleryRun.current=null;processingRef.current=Math.max(0,processingRef.current-1);if(mounted.current){setGalleryProgress(null);setProcessing(processingRef.current>0);}}
                 }
             };
             const changeKind = (id, kind) => {
@@ -1870,7 +1998,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const applyLoadedDraft=async draft=>{
                 const old=pending,created=[],rows=draft.pending.map(a=>{
                     const found=old.find(p=>p.id===a.id&&p.sha256===a.sha256&&p.size===a.size&&p.mime===a.mime);
-                    return found?.original?{...a,original:found.original,dataUrl:found.dataUrl}:a;
+                    return found?.original?{...a,original:found.original,dataUrl:found.dataUrl,...(found.thumbnailUrl!==undefined?{thumbnailUrl:found.thumbnailUrl}:{})}:a;
                 });
                 let applied=false;
                 try{
@@ -1981,7 +2109,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <form onSubmit={submit} aria-busy={saving || processing || discarding} className="form-shell gp-form">
                     {documentFile&&<DocumentEditor file={documentFile} onConfirm={confirmDocument} onCancel={closeDocument}/>}
                     <div className="form-heading"><p className="section-label">{initial ? 'IZMENA POSTOJEĆE GARANCIJE' : 'NOVI UNOS GARANCIJE'}</p><h1 data-page-heading tabIndex={-1}>{initial ? 'Izmena garancije' : 'Dodaj proizvod'}</h1></div>
-                    <p className="text-sm mb-3">Nacrt se čuva na ovom uređaju. Odustani zatvara formu i zadržava nacrt.</p>
+                    <p className="text-sm mb-3">Podaci obrasca čuvaju se lokalno. Odustani zatvara formu i zadržava nacrt.</p>
                     {sealed && <p role="status">Nastavak započetog čuvanja: podaci su zaključani dok se ishod ne potvrdi. Nedostajuće originale izaberite ponovo.</p>}
                     {error && <p role="alert" className="text-red-700">{error}</p>}
                     {staging&&!saving&&<p role="status">Čuvam lokalni nacrt…</p>}
@@ -2022,7 +2150,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                             {service?.mode === 'simulated-drive' ? 'SIMULACIJA: podaci i slike ostaju u lokalnom demo skladištu i posle osvežavanja. Nema stvarnog Drive-a.' : 'Lokalna priprema: produkcioni upis nije aktiviran.'}
                         </div>}
                         <section className="form-block" id="attachment-section" tabIndex={-1}><h2>Dokumenti i prilozi</h2><div className="space-y-3">
-                            <p id="attachment-picker-help" className="text-sm text-slate-600">Fotografija iz kamere otvara režim Dokumenti sa ručnim uglovima. Galerija dodaje originalne slike. Prethodni prilozi ostaju sačuvani.</p>
+                            <p id="attachment-picker-help" className="text-sm text-slate-600">Fotografija iz kamere otvara režim Dokumenti sa ručnim uglovima. Galerija dodaje originale; sačuvajte ih za ponovni izbor posle osvežavanja. Sačuvani prilozi ostaju nepromenjeni.</p>
                             <input ref={cameraInput} type="file" accept="image/*" capture="environment" aria-label="Fotografija dokumenta iz kamere" disabled={saving || processing || staging || sealed} onChange={handleCamera} className="hidden" />
                             <input ref={galleryInput} type="file" accept="image/*" multiple aria-label="Slike iz galerije" disabled={saving || processing || staging} onChange={handleFile} className="hidden" />
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2030,7 +2158,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                                 <button type="button" disabled={saving || processing || staging} aria-describedby="attachment-picker-help" onClick={() => galleryInput.current?.click()} className="min-h-[48px] w-full px-4 py-3 rounded-xl border border-blue-600 text-blue-700 font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 disabled:cursor-not-allowed">Dodaj iz galerije</button>
                             </div>
                         </div>
-                        {processing && <p role="status">Obrada fotografija...</p>}
+                        {galleryProgress?<div><p role="status">Pripremam sliku {galleryProgress.index} od {galleryProgress.total}…</p><button type="button" className="detail-actions" onClick={()=>galleryRun.current?.abort()}>Prekini pripremu</button></div>:processing&&<p role="status">Obrada fotografija...</p>}
+                        <details className="small muted"><summary>Granice galerije i nacrt</summary><p>Do 5 slika i 30 MiB po izboru, 10 MiB po novoj slici; do 10 novih galerijskih priloga i 50 MiB njihovih originala uz nacrt. Do 24 megapiksela i 20.000 px po strani. JPEG/PNG proveravamo pre otvaranja; GIF, WebP, BMP i AVIF tek posle dekodiranja. Memorija pregledača time nije garantovano ograničena.</p></details>
+                        {pending.some(a=>a.documentPhoto!==true)&&<p className="small muted">Galerija: nacrt pamti podatke i hash, ne i originalne slike. Posle osvežavanja ponovo izaberite iste originale.</p>}
+                        {pending.some(a=>a.documentPhoto===true&&a.original)&&<p className="small muted">Dokumenti: potvrđene fotografije imaju lokalnu kopiju uz nacrt. Brisanje podataka sajta može ukloniti te kopije.</p>}
                         <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} />
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
                         {imageError && <p role="alert" className="text-red-700">{imageError}</p>}
