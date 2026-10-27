@@ -156,6 +156,43 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         .warranty-delete fieldset label { display:block; padding:.5rem 0; }
         .warranty-delete .deletion-files { list-style:none; padding:0; margin:1rem 0; overflow-wrap:anywhere; }
         .warranty-delete .deletion-files li { border-bottom:1px solid #cbd5e1; padding:.6rem 0; }
+
+        /* Compact home only; other screens keep the accepted blue layout. */
+        body.gp-ui .home-active .header-inner{padding-block:12px}
+        body.gp-ui .home-active .header-right button{min-width:44px;min-height:44px}
+        body.gp-ui .home-screen .hero{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;max-width:none;padding-block:16px 12px}
+        body.gp-ui .home-screen .hero h1{font-size:2rem;flex:1 1 240px}
+        body.gp-ui .home-screen .hero .primary{margin:0;padding:.65rem 1rem;min-height:46px}
+        body.gp-ui .home-screen .draft-status-error{margin-bottom:12px}
+        body.gp-ui .home-screen .home-actions{display:flex;flex-wrap:wrap;gap:8px;min-width:0;max-width:100%}
+        body.gp-ui .home-screen .hero .home-actions>button{min-height:46px;font-size:.875rem;padding:.55rem .7rem;margin:0;flex:1 1 auto;width:auto}
+        body.gp-ui .home-screen .drive-strip{padding:10px 12px;gap:8px}
+        body.gp-ui .home-screen .drive-strip .drive-copy{flex:1 1 180px;flex-wrap:nowrap;gap:8px;font-size:.875rem}
+        body.gp-ui .home-screen .drive-strip .drive-connection-status{font-size:.875rem;line-height:1.35}
+        body.gp-ui .home-screen .drive-strip button{min-height:44px;font-size:.875rem;padding:.5rem .7rem}
+        body.gp-ui .home-screen .drive-strip>.error{flex-basis:100%}
+        body.gp-ui .home-screen .catalog{padding-top:16px}
+        body.gp-ui .home-screen .catalog-title{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+        body.gp-ui .home-screen .catalog-search-row{display:flex;align-items:stretch;flex-wrap:wrap;gap:8px}
+        body.gp-ui .home-screen .search-box{flex:1 1 11rem}
+        body.gp-ui .home-screen .search-box input{padding:.65rem 3rem .65rem 2.75rem;min-height:46px}
+        body.gp-ui .home-screen .search-box button{width:2.75rem;height:2.75rem;min-width:44px;min-height:44px;top:50%;right:2px;transform:translateY(-50%)}
+        body.gp-ui .home-screen .catalog-search-row>.icon-button{font-size:.875rem;min-height:46px;padding:.5rem .65rem}
+        body.gp-ui .home-screen .toolbar{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
+        body.gp-ui .home-screen .toolbar label{font-size:.875rem}
+        body.gp-ui .home-screen .toolbar select{font-size:1rem;padding:.55rem .65rem;min-height:46px}
+        body.gp-ui .home-screen .quick-status{gap:8px;margin-block:12px}
+        body.gp-ui .home-screen .quick-status button{min-height:44px;font-size:.875rem;padding:.4rem .65rem}
+        body.gp-ui .home-screen .results-line{margin-bottom:12px}
+        body.gp-ui .home-screen .results-line button{min-height:44px}
+        @media(max-width:600px){
+            body.gp-ui .home-screen .hero h1{font-size:1.75rem}
+            body.gp-ui .home-screen .hero .home-actions{flex:1 1 100%;width:100%}
+            body.gp-ui .home-screen .hero .home-actions>button{justify-content:center}
+            body.gp-ui .home-screen .catalog{padding-top:12px}
+            body.gp-ui .home-screen .toolbar{grid-template-columns:repeat(auto-fit,minmax(min(100%,9rem),1fr))}
+        }
+
     </style>
 </head>
 <body class="gp-ui">
@@ -1341,17 +1378,18 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             return <section className="notice" aria-label="Lokalne kopije fotografija"><p>Lokalne kopije završenog ili odbačenog nacrta čekaju čišćenje. Namera je sačuvana; drugi nalozi i aktivni nacrti se ne brišu.</p>{pending.map(item=><button key={item.operationId} type="button" disabled={busy} onClick={()=>retry(item.operationId)}>Pokušaj lokalno čišćenje ponovo</button>)}{error&&<p role="alert" className="error">{error}</p>}</section>;
         }
 
-        function DriveConnection({compact=false}) {
+        function DriveConnection({compact=false,home=false}) {
             const service = window.attachmentService;
             const [status, setStatus] = useState(service.getStatus());
             useEffect(() => service.subscribe(() => setStatus(service.getStatus())), [service]);
             const connect = async () => { try { await service.connect(); } catch (error) { setStatus({state:'error',message:error.message}); } };
             const statusText=status.state==='connected'?'Povezan: '+status.account:status.state==='connecting'?'Povezivanje...':'Drive nije povezan.';
             const connectLabel=status.state==='expired'||status.state==='error'?'Ponovo poveži Drive':status.state==='connected'?'Obnovi Drive vezu':'Poveži Drive';
+            const homeLabel=status.state==='connecting'?'Povezivanje':status.state==='connected'?'Obnovi':status.state==='expired'||status.state==='error'?'Ponovo poveži':'Poveži';
             return <section className={compact?'drive-strip':'stack'} aria-label="Drive povezivanje">
                 <div className="drive-copy"><span className="drive-icon"><Icon name="cloud"/></span><div><strong>{compact?'Google Drive':'Čuvanje priloga na Google Drive-u'}</strong><p role="status" className="drive-connection-status small muted">{statusText}</p></div></div>
                 {status.message&&<p role="alert" className="error">{status.message}</p>}
-                <div className="row"><button type="button" disabled={status.state==='connecting'} onClick={connect}>{connectLabel}</button>{!compact&&status.state==='connected'&&<button type="button" onClick={()=>service.disconnect()}>Prekini lokalnu vezu</button>}</div>
+                <div className="row"><button type="button" aria-label={home&&status.state==='connecting'?'Povezivanje sa Drive-om':connectLabel} disabled={status.state==='connecting'} onClick={connect}>{home?homeLabel:connectLabel}</button>{!compact&&status.state==='connected'&&<button type="button" onClick={()=>service.disconnect()}>Prekini lokalnu vezu</button>}</div>
                 {!service.writesEnabled&&<p className="small muted">Folderi i upload su zaključani do zasebnog odobrenja. Povezivanje samo po sebi ne čuva priloge.</p>}
             </section>;
         }
@@ -1451,7 +1489,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.27.4';
+        const RELEASE_VERSION = '2026.10.27.5';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -1683,11 +1721,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const rows=invalidRange?[]:catalogRows(all,search,filters,sort);
             const active=[filters.category&&'Kategorija: '+filters.category,filters.status&&'Status: '+({valid:'Važeće',soon:'Uskoro ističu',expired:'Istekle'}[filters.status]),filters.store&&'Prodavnica: '+(stores.find(s=>s[0]===filters.store)?.[1]||filters.store),filters.from&&'Od: '+filters.from,filters.to&&'Do: '+filters.to].filter(Boolean);
             return <section className="catalog" aria-labelledby="catalog-title">
-                <div className="section-heading"><h2 id="catalog-title" data-page-heading tabIndex={-1}>Moja evidencija</h2><p className="muted">Sačuvajte mir. Pratite ono što vam je važno.</p></div>
+                <h2 id="catalog-title" className="catalog-title">Moja evidencija</h2>
                 <label className="search-label" htmlFor="catalog-search">Pretraži proizvode, prodavnice i opise</label>
-                <div className="search-box"><Icon name="search"/><input id="catalog-search" type="search" value={search} placeholder="Šta tražite?" onChange={e=>setSearch(e.target.value)}/><button type="button" aria-label="Obriši pretragu" disabled={!search} onClick={()=>setSearch('')}><Icon name="x"/></button></div>
+                <div className="catalog-search-row"><div className="search-box"><Icon name="search"/><input id="catalog-search" type="search" value={search} placeholder="Šta tražite?" onChange={e=>setSearch(e.target.value)}/><button type="button" aria-label="Obriši pretragu" disabled={!search} onClick={()=>setSearch('')}><Icon name="x"/></button></div><button type="button" aria-expanded={showFilters} aria-controls="catalog-filters" onClick={()=>setShowFilters(v=>!v)} className="icon-button"><Icon name="sliders-horizontal"/>Filteri{active.length?' ('+active.length+')':''}</button></div>
                 <div className="toolbar">
-                    <button type="button" aria-expanded={showFilters} aria-controls="catalog-filters" onClick={()=>setShowFilters(v=>!v)} className="icon-button"><Icon name="sliders-horizontal"/>Filteri{active.length?' ('+active.length+')':''}</button>
                     <label>Sortiraj<select value={sort} onChange={e=>setSort(e.target.value)}><option value="newest">Najnovije dodato</option><option value="oldest">Najstarije dodato</option><option value="name-asc">Naziv A–Z</option><option value="name-desc">Naziv Z–A</option><option value="expiry">Garancija najpre ističe</option><option value="purchase-new">Datum kupovine: novije prvo</option><option value="purchase-old">Datum kupovine: starije prvo</option></select></label>
                     <label>Prikaz<select value={mode} onChange={e=>changeMode(e.target.value)}><option value="cards">Kartice</option><option value="list">Lista</option><option value="detailed">Detaljno</option></select></label>
                 </div>
@@ -1704,7 +1741,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <div className="results-line"><p role="status">Prikazano <strong>{listState==='ready'?rows.length:0}</strong> od {all.length} proizvoda</p><button type="button" onClick={()=>{setFilters(blankFilters());setSearch('');setSort('newest');}}>Poništi filtere</button></div>
                 {listState==='loading'&&<p role="status">Učitavanje garancija...</p>}
                 {listState==='error'&&<div role="alert" className="error">Garancije nisu učitane. <button type="button" onClick={onRetry}>Pokušaj ponovo</button></div>}
-                {listState==='ready'&&!rows.length&&<div className="empty-state"><Icon name="search"/><h3>{all.length?'Nema rezultata':'Još nema garancija'}</h3><p className="muted">{all.length?'Probajte drugi naziv ili poništite filtere. Vaša evidencija je sačuvana.':'Dodajte prvu garanciju dugmetom Dodaj proizvod.'}</p></div>}
+                {listState==='ready'&&!rows.length&&<div className="empty-state"><Icon name="search"/><h3>{all.length?'Nema rezultata':'Još nema garancija'}</h3><p className="muted">{all.length?'Probajte drugi naziv ili poništite filtere. Vaša evidencija je sačuvana.':'Počnite ili nastavite unos glavnom akcijom iznad.'}</p></div>}
                 {mode==='detailed'?<table className="details-table" role="table" aria-label="Detaljni pregled garancija"><thead role="rowgroup"><tr role="row">{['Proizvod','Kategorija','Prodavnica','Kupljeno','Ističe','Status','Opis','Prilozi'].map(h=><th role="columnheader" scope="col" key={h}>{h}</th>)}</tr></thead><tbody role="rowgroup">{(listState==='ready'?rows:[]).map(({w,exp,days})=><tr role="row" key={w.id}>{[
                     ['Proizvod',<button type="button" className="catalog-open" onClick={()=>onOpen(w)}>{textValue(w.name)||'Bez naziva'}</button>],['Kategorija',categoryLabel(w.category)],['Prodavnica',textValue(w.store)||'—'],['Kupljeno',fmtDate(parseDate(w.purchaseDate))],['Ističe',fmtDate(exp)],['Status',getStyle(days).l],['Opis',textValue(w.description)||'—'],['Prilozi',legacyAttachments(w).length+attachmentRefs(w).length]
                 ].map(([label,value])=><td role="cell" key={label}><span className="catalog-cell-label">{label}: </span>{value}</td>)}</tr>)}</tbody></table>:
@@ -1728,6 +1765,39 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const [formBusy, setFormBusy] = useState(false);
             const [notice, setNotice] = useState('');
             const [attachmentSection, setAttachmentSection] = useState(false);
+            const [draftStatus,setDraftStatus]=useState({uid:null,state:'checking'});
+            const [newEntry,setNewEntry]=useState(false);
+            const [resumeEntry,setResumeEntry]=useState(null);
+            const refreshDraftStatus=useRef(()=>{});
+            const inspectHomeDraft=uid=>{
+                if(!uid||window.firebaseDeps?.auth?.currentUser?.uid!==uid)throw Error('Nalog se promenio.');
+                const service=window.attachmentService,draft=service.getDraft(uid),revision=service.contentRevision(draft);
+                if(draft!==null&&(!draft||typeof draft!=='object'||Array.isArray(draft)||typeof draft.edit!=='boolean'||typeof draft.id!=='string'||typeof draft.operationId!=='string'||!draft.metadata||typeof draft.metadata!=='object'||Array.isArray(draft.metadata)||!Array.isArray(draft.attachments)||!Array.isArray(draft.pending)||(draft.sealed!==undefined&&typeof draft.sealed!=='boolean')))throw Error('Nacrt nije prepoznat.');
+                if(window.firebaseDeps?.auth?.currentUser?.uid!==uid)throw Error('Nalog se promenio.');
+                return {draft,status:{uid,state:draft?(draft.sealed?'saving':'draft'):'none',revision}};
+            };
+            useEffect(()=>{
+                if(!user||view==='add'||view==='edit')return;
+                const service=window.attachmentService,uid=user.uid;let active=true;
+                const read=()=>{
+                    if(!active)return;
+                    let next;
+                    try{
+                        next=inspectHomeDraft(uid).status;
+                    }catch{next={uid,state:'error'};}
+                    if(active)setDraftStatus(previous=>previous.uid===next.uid&&previous.state===next.state&&previous.revision===next.revision?previous:next);
+                };
+                refreshDraftStatus.current=read;read();
+                const unsubscribe=typeof service?.subscribe==='function'?service.subscribe(read):()=>{};
+                const storageChanged=event=>{if(event.key===null||event.key?.startsWith('garancije-drive-integration-v1:')){try{if(event.storageArea===window.localStorage)read();}catch{read();}}};
+                window.addEventListener('storage',storageChanged);window.addEventListener('focus',read);
+                return()=>{active=false;unsubscribe();window.removeEventListener('storage',storageChanged);window.removeEventListener('focus',read);if(refreshDraftStatus.current===read)refreshDraftStatus.current=()=>{};};
+            },[user?.uid,view]);
+            const currentDraftStatus=draftStatus.uid===user?.uid?draftStatus.state:'checking';
+            const continueDraftLabel=currentDraftStatus==='draft'?'Nastavi nacrt':currentDraftStatus==='saving'?'Nastavi čuvanje':'';
+            const draftActionDisabled=formBusy||!['none','draft','saving'].includes(currentDraftStatus);
+            const draftStatusWarning=<div role="alert" className="notice draft-status-error"><p>Status nacrta nije moguće proveriti. Podaci nisu obrisani niti je otvoren novi unos.</p><button type="button" disabled={formBusy} onClick={()=>refreshDraftStatus.current()}>Proveri ponovo</button></div>;
+
             const mainRef = useRef(null);
             const headingInputMode = useRef('automatic');
             useEffect(() => {
@@ -1743,7 +1813,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     document.removeEventListener('pointerdown', markHeadingInput, true);
                 };
             }, []);
-            const finishNavigation = next => { setView(next); setAttachmentSection(false); };
+            const finishNavigation = next => { if(view==='add'||view==='edit')setDraftStatus({uid:user?.uid,state:'checking'});setView(next); setAttachmentSection(false); };
             const navigate = next => { if (!formBusy) finishNavigation(next); };
             useEffect(() => {
                 const frame=requestAnimationFrame(()=>{
@@ -1793,15 +1863,20 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return () => { active = false; if (unsubscribe) unsubscribe(); };
             }, [user, retry]);
 
-            const openForm = (record=null,focusAttachments=false) => {
+            const openForm = (record=null,focusAttachments=false,intent=null) => {
                 if(formBusy)return;
-                try { const d=window.attachmentService.getDraft(user.uid);
+                try {
+                    const live=intent?inspectHomeDraft(user.uid):null,d=live?live.draft:window.attachmentService.getDraft(user.uid);
+                    if(live)setDraftStatus(live.status);
+                    if(intent==='new'&&d)throw Error(d.sealed?'Već je započeto čuvanje. Izaberite Nastavi čuvanje pre novog unosa.':'Već postoji nedovršen nacrt. Izaberite Nastavi nacrt pre novog unosa.');
+                    if(intent==='resume'&&!d)throw Error('Nacrt više nije dostupan. Za novi unos izaberite Dodaj proizvod.');
                     if(record){record=warranties.find(w=>w.id===record.id)||record;if(record._attachmentDeletion)throw Error('Prvo razrešite započeto brisanje ove garancije.');}
                     if (record && !draftMatchesRecord(d, record)) throw new Error(draftConflictMessage);
-                    setAuthError(''); setAttachmentSection(focusAttachments);
+                    setAuthError(''); setAttachmentSection(focusAttachments); setNewEntry(intent==='new');
+                    setResumeEntry(intent==='resume'?{operationId:d.operationId,id:d.id,edit:d.edit}:null);
                     if(d) { setSelected(d.edit ? (warranties.find(w=>w.id===d.id)||{id:d.id}) : null); setView(d.edit?'edit':'add'); }
                     else {setSelected(record);setView(record?'edit':'add');}
-                } catch(e) {setAuthError(e.message);}
+                } catch(e) {if(intent)refreshDraftStatus.current();setAuthError(e.message);}
             };
             const login = async () => {
                 try { setAuthError(''); await window.firebaseDeps.signInWithPopup(window.firebaseDeps.auth, window.firebaseDeps.provider); }
@@ -1828,7 +1903,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 </div>
             );
 
-            return <div className="gp-app">
+            return <div className={'gp-app'+(view==='list'?' home-active':'')}>
                 <a href="#app-main" className="skip-link">Pređi na sadržaj</a>
                 <header className="app-header"><div className="gp-container header-inner">
                     <button type="button" className="brand quiet" disabled={formBusy} onClick={()=>navigate('list')}><span className="brand-mark"><Icon name="shield-check"/></span><span>GarancijePro</span></button>
@@ -1837,18 +1912,18 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <main className="gp-container" id="app-main" ref={mainRef} tabIndex={-1}>
                     {notice&&<p role="status" className="toast">{notice}</p>}{authError&&<p role="alert" className="error">{authError}</p>}
                     {view!=='list'&&view!=='settings'&&<div className="context-drive"><DriveConnection compact/></div>}
-                    <div hidden={view!=='list'}>
-                        <section className="hero"><p className="section-label">VAŠA DIGITALNA EVIDENCIJA</p><h1 data-page-heading tabIndex={-1}>Računi i garancije</h1><p>Uredno složeni i uvek pri ruci. Više reda, manje traženja.</p><button type="button" className="primary icon-button" disabled={formBusy} onClick={()=>openForm()}><Icon name="plus"/>Dodaj proizvod</button></section>
-                        {view==='list'&&<><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail');}}/><DriveConnection compact/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije završenog nacrta su uklonjene.')}/></>}
-                        <button type="button" className="resume-draft" disabled={formBusy} onClick={()=>openForm()}>Nastavi nacrt / novi unos</button>
+                    <div className="home-screen" hidden={view!=='list'}>
+                        <section className="hero"><h1 data-page-heading tabIndex={-1}>Računi i garancije</h1><div className="home-actions"><button type="button" className="primary icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</div></section>
+                        {currentDraftStatus==='error'&&draftStatusWarning}
+                        {view==='list'&&<><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail');}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije završenog nacrta su uklonjene.')}/></>}
                         <Catalog key={user.uid} records={warranties} user={user} listState={listState} onRetry={()=>setRetry(r=>r+1)} onOpen={w=>{setSelected(w);navigate('detail');}}/>
                     </div>
-                    {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>finishNavigation(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list')} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list');setNotice('Nacrt je odbačen.');}} user={user}/></div>}
+                    {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} requireEmptyDraft={newEntry} expectedResume={resumeEntry} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>finishNavigation(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list')} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list');setNotice('Nacrt je odbačen.');}} user={user}/></div>}
                     {view==='detail'&&selected&&<Detail onEdit={()=>openForm(selected)} onAddAttachment={()=>openForm(selected,true)} onBusy={setFormBusy} onDeleted={message=>{setNotice(message);finishNavigation('list');}} item={warranties.find(w=>w.id===selected.id)||selected} onBack={()=>finishNavigation('list')} user={user}/>}
-                    {view==='settings'&&<section className="page-content settings-shell"><button type="button" className="quiet back-button" disabled={formBusy} onClick={()=>navigate('list')}><Icon name="arrow-left"/>Moja evidencija</button><h1 data-page-heading tabIndex={-1}>Podešavanja</h1><section className="panel"><h2>Nalog</h2><p className="small muted">Odjava ne briše lokalne fotografije nedovršenog nacrta. Brisanje podataka sajta može ih ukloniti.</p><p className="account-name">{textValue(user.email)||'Prijavljeni nalog'}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={logout}><Icon name="log-out"/> Odjavi se</button></section><section className="panel"><DriveConnection/></section><section className="panel"><h2>Verzija i nacrt</h2><p>Verzija {RELEASE_VERSION}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={()=>openForm()}>Nastavi nacrt / novi unos</button></section></section>}
+                    {view==='settings'&&<section className="page-content settings-shell"><button type="button" className="quiet back-button" disabled={formBusy} onClick={()=>navigate('list')}><Icon name="arrow-left"/>Moja evidencija</button><h1 data-page-heading tabIndex={-1}>Podešavanja</h1><section className="panel"><h2>Nalog</h2><p className="small muted">Odjava ne briše lokalne fotografije nedovršenog nacrta. Brisanje podataka sajta može ih ukloniti.</p><p className="account-name">{textValue(user.email)||'Prijavljeni nalog'}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={logout}><Icon name="log-out"/> Odjavi se</button></section><section className="panel"><DriveConnection/></section><section className="panel"><h2>Verzija i nacrt</h2><p>Verzija {RELEASE_VERSION}</p>{currentDraftStatus==='error'&&draftStatusWarning}<button type="button" className="detail-actions" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="detail-actions" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</section></section>}
                     <nav className="bottom-nav" aria-label="Glavna navigacija">
                         <button type="button" aria-current={view==='list'?'page':undefined} disabled={formBusy} onClick={()=>navigate('list')}><Icon name="layout-grid"/><span>Proizvodi</span></button>
-                        <button type="button" aria-current={view==='add'||view==='edit'?'page':undefined} disabled={formBusy||view==='add'||view==='edit'} onClick={()=>openForm()}><Icon name="plus"/><span>Dodaj</span></button>
+                        <button type="button" aria-current={view==='add'||view==='edit'?'page':undefined} disabled={draftActionDisabled||view==='add'||view==='edit'} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/><span>Dodaj proizvod</span></button>
                         <button type="button" aria-current={view==='settings'?'page':undefined} disabled={formBusy} onClick={()=>navigate('settings')}><Icon name="settings"/><span>Podešavanja</span></button>
                     </nav>
                 </main><AppFooter/>
@@ -1856,8 +1931,12 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         }
 
         function AddForm(props) {
+            const firstOpen=useRef(true);
             try {
                 const draft=window.attachmentService.getDraft(props.user.uid);window.attachmentService.contentRevision(draft);
+                if(firstOpen.current&&props.requireEmptyDraft&&draft)throw Error('U međuvremenu je nastao nacrt. Vratite se na evidenciju i izaberite Nastavi nacrt.');
+                if(firstOpen.current&&props.expectedResume&&(!draft||['operationId','id','edit'].some(key=>draft[key]!==props.expectedResume[key])))throw Error('Nacrt je u međuvremenu završen ili promenjen. Vratite se na evidenciju i proverite aktuelno stanje.');
+                firstOpen.current=false;
                 return <DraftForm {...props} savedDraft={draft}/>;
             } catch(error) {
                 return <section role="alert" className="error"><p>Nacrt nije moguće bezbedno otvoriti. {error.message} Sačuvani podaci nisu menjani.</p><button type="button" onClick={props.onCancel}>Nazad na evidenciju</button></section>;
