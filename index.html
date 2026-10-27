@@ -25,6 +25,7 @@
         .warranty-card-status { flex-shrink: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
         .warranty-card-title { white-space: normal; overflow-wrap: anywhere; }
         .attachment-list { min-width: 0; overflow-wrap: anywhere; }
+        body.gp-ui .gp-attachment .pending-remove { min-width:44px; min-height:44px; }
         .attachment-open-button { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
         @media (max-width: 639px) {
             .warranty-card-meta { flex-direction: column; }
@@ -333,16 +334,20 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             for(const a of rows){if(a.autoNamed!==true)continue;const k=kinds.includes(a.kind)?a.kind:'Ostalo';if(a.pageKind===k&&Number.isSafeInteger(a.page)&&a.page>0&&!used[k].has(a.page)){used[k].add(a.page);max[k]=Math.max(max[k],a.page);}else a.page=null;}
             for(const a of rows){
                 if(a.autoNamed!==true)continue;
-                const k=kinds.includes(a.kind)?a.kind:'Ostalo';if(!a.page){a.page=++max[k];used[k].add(a.page);}a.pageKind=k;a.extension=extension(a.mime,a.extension?'original'+a.extension:a.name);
+                const k=kinds.includes(a.kind)?a.kind:'Ostalo',sameKind=a.pageKind===k;if(!a.page){a.page=++max[k];used[k].add(a.page);}a.pageKind=k;a.extension=extension(a.mime,a.extension?'original'+a.extension:a.name);
+                if(k==='Račun'&&(count[k]>1||sameKind&&a.pageNumbered===true))a.pageNumbered=true;else delete a.pageNumbered;
                 if(a.nameCustom)continue;
+                const held=a.retainedAutoName;
+                if(held&&held.product===String(product||'')&&held.kind===k&&typeof held.name==='string'){a.name=held.name;continue;}
+                delete a.retainedAutoName;
                 const clean=String(product||'').normalize('NFC').replace(/[\p{Cc}\p{Cf}<>:"/\\|?*]/gu,' ').replace(/\s+/g,' ').trim().replace(/[. ]+$/g,'')||'Proizvod';
-                const prefix=k+'-',suffix=k==='Račun'&&count[k]===1?'':'-str'+String(a.page).padStart(2,'0');
+                const prefix=k+'-',suffix=k==='Račun'&&count[k]===1&&!a.pageNumbered?'':'-str'+String(a.page).padStart(2,'0');
                 const budget=120-Array.from(prefix+suffix).length,short=Array.from(clean).slice(0,Math.max(1,budget)).join('').trim().replace(/[. ]+$/g,'')||'Proizvod';
                 a.nameTruncated=Array.from(clean).length>budget;a.name=prefix+short+suffix+a.extension;
             }
             const groups=new Map();for(const a of rows){if(!a.sha256)continue;const key=a.sha256+':'+a.size+':'+a.mime;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(a);}
             for(const group of groups.values()){if(group.length<2)continue;const custom=group.filter(a=>a.nameCustom||a.autoNamed!==true),chosen=custom[0]||group[0];for(const a of group)if(a.autoNamed===true&&!a.nameCustom)a.name=chosen.name;}
-            const fields=['name','page','pageKind','extension','nameTruncated'];
+            const fields=['name','page','pageKind','extension','nameTruncated','pageNumbered','retainedAutoName'];
             return rows.every((a,i)=>fields.every(k=>a[k]===pending[i][k]))?pending:rows;
         };
         const validatePending = pending => {
@@ -402,7 +407,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         const forgetSession = () => { try { sessionStore()?.removeItem(sessionKey); } catch {} };
         const rememberSession = () => { try { sessionStore()?.setItem(sessionKey, JSON.stringify({version:1,accessToken:token,expiresAt:deadline,uid:sessionUid,account,scope:SCOPE})); } catch {} };
         const photoStore = options.photoStore || (!options.simulated ? createDocumentPhotoStore(() => window.indexedDB) : null);
-        const pendingMetadata = pending => pending.map(({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto})=>({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated,...(documentPhoto===true?{documentPhoto:true}:{})}));
+        const pendingMetadata = pending => pending.map(({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto,pageNumbered,retainedAutoName})=>({id,name,kind,mime,size,sha256,autoNamed,nameCustom,page,pageKind,extension,nameTruncated,...(documentPhoto===true?{documentPhoto:true}:{}),...(pageNumbered===true?{pageNumbered:true}:{}),...(retainedAutoName?{retainedAutoName}:{})}));
         const photoOperationKey = (uid,operationId) => JSON.stringify([uid,operationId]);
         const hasPhotos = (uid,draft) => draft.pending.some(a=>a.documentPhoto===true) || !!journal().documentPhotoOps?.[photoOperationKey(uid,draft.operationId)];
         const registerPhotoOperation = (uid,operationId) => mutateJournal(j=>{
@@ -412,6 +417,18 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const key=photoOperationKey(uid,draft.operationId);
             if(draft.pending.some(a=>a.documentPhoto===true)||j.documentPhotoOps?.[key])
                 j.documentPhotoCleanups={...j.documentPhotoCleanups,[key]:{uid,operationId:draft.operationId,reason}};
+        };
+        const attachmentCleanupKey = (uid,operationId,id) => JSON.stringify([uid,operationId,id]);
+        const finishAttachmentCleanup = async (uid,operationId,id) => {
+            assertUser(uid);
+            const key=attachmentCleanupKey(uid,operationId,id),intent=journal().documentPhotoAttachmentCleanups?.[key];
+            if(!intent||intent.uid!==uid||intent.operationId!==operationId||intent.id!==id)throw Error('Nema potvrđene namere za čišćenje ovog priloga.');
+            const inactive=j=>{if(j.draft?.operationId===operationId&&j.draft.pending.some(a=>a.id===id))throw Error('Prilog je aktivan u nacrtu. Lokalna kopija nije uklonjena.');};
+            inactive(journal());
+            if(!photoStore?.remove)throw Error('Lokalno čišćenje priloga nije dostupno. Namera je sačuvana.');
+            await photoStore.remove(uid,operationId,[id]);assertUser(uid);
+            mutateJournal(j=>{inactive(j);if(canonical(j.documentPhotoAttachmentCleanups?.[key])!==canonical(intent))throw Error('Namera čišćenja priloga se promenila.');delete j.documentPhotoAttachmentCleanups[key];});
+            notify();return {attachment:true};
         };
         const finishPhotoCleanup = async (uid,operationId) => {
             assertUser(uid);
@@ -425,6 +442,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 const current=j.documentPhotoCleanups?.[key];
                 if(!current||canonical(current)!==canonical(intent))throw Error('Namera čišćenja se promenila.');
                 delete j.documentPhotoCleanups[key];if(j.documentPhotoOps)delete j.documentPhotoOps[key];
+                for(const [entry,item]of Object.entries(j.documentPhotoAttachmentCleanups||{}))if(item?.uid===uid&&item.operationId===operationId)delete j.documentPhotoAttachmentCleanups[entry];
                 if(intent.reason==='saved'&&j.draft?.operationId===operationId&&j.draft.sealed)j.draft=null;
             });
             notify();return {saved:intent.reason==='saved'};
@@ -901,12 +919,39 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 if(journal().draft?.operationId!==draft.operationId)throw Error('Nacrt se promenio tokom obnavljanja fotografija.');
                 return {photos,missing};
             },
+            async removePendingAttachment({userId,operationId,attachmentId,expectedRevision,expectedPending,expectedMetadata,expectedAttachments,isCurrent}) {
+                return lock(async()=>{
+                    const check=()=>{assertUser(userId);if(isCurrent?.()===false)throw new DOMException('Uklanjanje priloga je otkazano.','AbortError');};
+                    check();const d=journal().draft;
+                    if(!d||d.operationId!==operationId)throw staleDraft();checkDraftRevision(d,expectedRevision);
+                    if(d.sealed||d.saveState||pendingCommits.get(commitKey(userId,operationId))?.pending)throw Error('Započeto ili neizvesno čuvanje prvo mora da se razreši. Prilog nije uklonjen.');
+                    const fingerprint=typeof expectedPending==='function'?expectedPending():expectedPending;
+                    if(canonical(pendingMetadata(d.pending))!==fingerprint)throw staleDraft();
+                    if(canonical(d.metadata)!==canonical(expectedMetadata)||canonical(d.attachments)!==canonical(expectedAttachments))throw Error('Sačekajte završetak čuvanja lokalnog nacrta pa pokušajte ponovo.');
+                    const matches=d.pending.filter(a=>a.id===attachmentId),target=matches[0];
+                    if(matches.length!==1||!target||target.legacy||target.driveFileId||target.storage||d.attachments.some(a=>a.id===attachmentId)||typeof target.name!=='string'||!Number.isSafeInteger(target.size)||target.size<1||!/^[a-f0-9]{64}$/i.test(target.sha256||'')||!/^image\/(png|jpeg|gif|webp|bmp|avif)$/i.test(target.mime||''))throw Error('Identitet novog neposlatog priloga nije potvrđen. Nema uklanjanja.');
+                    for(const a of d.pending){const key=await hashText('upload:'+operationId+':'+a.sha256);check();if(journal().jobs[key])throw Error('Postoji rezervisan ili slat prilog ove operacije. Koristite nastavak čuvanja; nema uklanjanja.');}
+                    check();if(canonical(journal().draft)!==canonical(d))throw staleDraft();
+                    const remaining=d.pending.filter(a=>a.id!==attachmentId).map(a=>{
+                        if(a.autoNamed!==true||a.nameCustom)return a;
+                        return {...a,...(a.kind==='Račun'&&d.pending.filter(p=>p.kind==='Račun').length>1?{pageNumbered:true}:{}),retainedAutoName:{product:String(d.metadata.name||''),kind:a.kind,name:a.name}};
+                    });
+                    let result;mutateJournal(j=>{
+                        if(canonical(j.draft)!==canonical(d))throw staleDraft();check();
+                        j.draft={...d,pending:remaining,revision:nextDraftRevision(d)};result=structuredClone(j.draft);
+                        if(target.documentPhoto===true){const key=attachmentCleanupKey(userId,operationId,attachmentId);j.documentPhotoAttachmentCleanups={...j.documentPhotoAttachmentCleanups,[key]:{uid:userId,operationId,id:attachmentId,name:target.name,sha256:target.sha256,size:target.size,mime:target.mime}};}
+                    });notify();
+                    let localCopyRetained=false;
+                    if(target.documentPhoto===true)try{await finishAttachmentCleanup(userId,operationId,attachmentId);}catch{localCopyRetained=true;}
+                    return {draft:result,localCopyRetained};
+                });
+            },
             getDocumentPhotoCleanups(userId) {
                 assertUser(userId);
-                return Object.values(journal().documentPhotoCleanups||{}).filter(x=>x&&x.uid===userId&&typeof x.operationId==='string'&&['saved','discard'].includes(x.reason)).map(x=>({...x}));
+                const j=journal();return [...Object.values(j.documentPhotoCleanups||{}).filter(x=>x&&x.uid===userId&&typeof x.operationId==='string'&&['saved','discard'].includes(x.reason)).map(x=>({...x})),...Object.values(j.documentPhotoAttachmentCleanups||{}).filter(x=>x&&x.uid===userId&&typeof x.operationId==='string'&&typeof x.id==='string').map(x=>({...x,attachmentId:x.id}))];
             },
-            async retryDocumentPhotoCleanup({userId,operationId}) {
-                return lock(async()=>{assertUser(userId);return finishPhotoCleanup(userId,operationId);});
+            async retryDocumentPhotoCleanup({userId,operationId,attachmentId}) {
+                return lock(async()=>{assertUser(userId);return attachmentId?finishAttachmentCleanup(userId,operationId,attachmentId):finishPhotoCleanup(userId,operationId);});
             },
             async discardDraft({userId,id,operationId,expected,expectedRevision}) {
                 assertUser(userId);
@@ -975,7 +1020,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         }
                         const detail=await ordinaryRequest(API+'/files/'+encodeURIComponent(fileId)+'?fields=id,ownedByMe,shared,permissions(type,role,emailAddress)',{},json,control);
                         if(!detail.ownedByMe || detail.shared!==false || !detail.permissions?.length || detail.permissions.some(p=>p.role!=='owner'||p.type!=='user'||p.emailAddress?.toLowerCase()!==EMAIL)) throw new Error('Privatnost priloga nije potvrđena.');
-                        const {autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto,thumbnailUrl,...reference}=a;
+                        const {autoNamed,nameCustom,page,pageKind,extension,nameTruncated,documentPhoto,pageNumbered,retainedAutoName,thumbnailUrl,...reference}=a;
                         refs.push({...reference,driveFileId:fileId,storage:'google-drive'});
                     }
                     // commit must atomically compare the complete original snapshot and merge only edited fields.
@@ -1362,20 +1407,20 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         }
 
 
-        function LocalPhotoCleanup({user,onComplete}) {
+        function LocalPhotoCleanup({user,onComplete,disabled=false}) {
             const service=window.attachmentService;
             const [,refresh]=useState(0),[busy,setBusy]=useState(false),[error,setError]=useState('');
             const running=useRef(false),alive=useRef(true);
             useEffect(()=>{alive.current=true;const unsubscribe=service.subscribe(()=>{if(alive.current)refresh(v=>v+1);});return()=>{alive.current=false;unsubscribe();};},[service]);
             let pending=[];try{pending=service.getDocumentPhotoCleanups(user.uid);}catch{}
-            const retry=async operationId=>{
-                if(running.current)return;running.current=true;setBusy(true);setError('');
-                try{await service.retryDocumentPhotoCleanup({userId:user.uid,operationId});if(alive.current)onComplete?.();}
+            const retry=async item=>{
+                if(running.current||disabled)return;running.current=true;setBusy(true);setError('');
+                try{await service.retryDocumentPhotoCleanup({userId:user.uid,operationId:item.operationId,attachmentId:item.attachmentId});if(alive.current)onComplete?.();}
                 catch(e){if(alive.current)setError(e.message);}
                 finally{running.current=false;if(alive.current){setBusy(false);refresh(v=>v+1);}}
             };
             if(!pending.length)return null;
-            return <section className="notice" aria-label="Lokalne kopije fotografija"><p>Lokalne kopije završenog ili odbačenog nacrta čekaju čišćenje. Namera je sačuvana; drugi nalozi i aktivni nacrti se ne brišu.</p>{pending.map(item=><button key={item.operationId} type="button" disabled={busy} onClick={()=>retry(item.operationId)}>Pokušaj lokalno čišćenje ponovo</button>)}{error&&<p role="alert" className="error">{error}</p>}</section>;
+            return <section className="notice" aria-label="Lokalne kopije fotografija"><p>Lokalne kopije uklonjenih priloga ili završenih nacrta čekaju čišćenje. Namera je sačuvana; drugi nalozi i aktivni nacrti se ne brišu.</p>{pending.map(item=><button key={item.operationId+':'+(item.attachmentId||'operation')} type="button" disabled={busy||disabled} onClick={()=>retry(item)}>Pokušaj lokalno čišćenje ponovo{item.attachmentId?' — '+item.name:''}</button>)}{error&&<p role="alert" className="error">{error}</p>}</section>;
         }
 
         function DriveConnection({compact=false,home=false}) {
@@ -1465,7 +1510,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             </>;
         }
 
-        function AttachmentList({ attachments, user, onKindChange, onNameChange, pendingIds=[] }) {
+        function AttachmentList({ attachments, user, onKindChange, onNameChange, onRemovePending, removeDisabled=false, pendingIds=[] }) {
             const [opened, setOpened] = useState(null);
             return <section className="attachment-list space-y-3" aria-label="Prilozi">
                 {attachments.length === 0 && <p className="text-slate-500">Nema priloga.</p>}
@@ -1476,6 +1521,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     <p className="font-bold break-all">{a.name}</p>{!a.legacy && !a.dataUrl && !a.driveFileId && <p>{a.documentPhoto?'Izaberite tačnu konačnu fotografiju za nastavak. Original pre obrade ne odgovara obrađenoj slici. Već poslati fajl proverite preko Sačuvaj.':'Ponovo izaberite original za nastavak ili proverite već poslati fajl preko Sačuvaj.'}</p>}
                     {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
                     {onNameChange&&pendingIds.includes(a.id)&&<div><label>Naziv priloga {n+1} (bez ekstenzije)<input type="text" aria-label={'Naziv priloga '+(n+1)} value={attachmentNames.base(a.name,a.mime,a.extension)} onChange={e=>onNameChange(a.id,e.target.value)} autoComplete="off"/></label><p className="small muted">Ekstenzija je zaključana: {a.extension||attachmentNames.extension(a.mime,a.name)}{a.kind==='Ostalo'?' · Slobodan naziv po vašem izboru.':''}</p>{a.nameTruncated&&<p role="status" className="small muted">Automatski predlog je skraćen na 120 znakova. Pregledajte ceo naziv iznad.</p>}{nameError&&<p role="alert" className="error">{nameError}</p>}</div>}
+                    {onRemovePending&&pendingIds.includes(a.id)&&!a.legacy&&!a.driveFileId&&!a.storage&&<button type="button" disabled={removeDisabled} aria-label={'Ukloni iz nacrta: '+a.name} onClick={()=>onRemovePending(a.id)} className="danger pending-remove">Ukloni iz nacrta</button>}
                     {thumbnail && !a.legacy && <img src={thumbnail} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
                     <button type="button" aria-label={"Prikaži prilog: " + a.name} disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="attachment-open-button text-blue-700 border rounded-xl px-3 py-2">Prikaži prilog</button>
                 </div>;})}
@@ -1489,7 +1535,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.27.5';
+        const RELEASE_VERSION = '2026.10.27.6';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -1915,7 +1961,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     <div className="home-screen" hidden={view!=='list'}>
                         <section className="hero"><h1 data-page-heading tabIndex={-1}>Računi i garancije</h1><div className="home-actions"><button type="button" className="primary icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</div></section>
                         {currentDraftStatus==='error'&&draftStatusWarning}
-                        {view==='list'&&<><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail');}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije završenog nacrta su uklonjene.')}/></>}
+                        {view==='list'&&<><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail');}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije su uklonjene.')}/></>}
                         <Catalog key={user.uid} records={warranties} user={user} listState={listState} onRetry={()=>setRetry(r=>r+1)} onOpen={w=>{setSelected(w);navigate('detail');}}/>
                     </div>
                     {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} requireEmptyDraft={newEntry} expectedResume={resumeEntry} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>finishNavigation(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list')} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list');setNotice('Nacrt je odbačen.');}} user={user}/></div>}
@@ -1985,6 +2031,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const cameraAccepting=useRef(false);
             const [error, setError] = useState('');
             const [imageError, setImageError] = useState('');
+            const [removing,setRemoving]=useState(false),removingRef=useRef(false),[removalNotice,setRemovalNotice]=useState('');
             const savingRef = useRef(false), processingRef = useRef(recoveringPhotos?1:0);
             const [staging,setStaging]=useState(false),stagingRef=useRef(false),stageSequence=useRef(0);
             const mounted = useRef(true);
@@ -1995,7 +2042,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             useEffect(()=>()=>{galleryRun.current?.abort();},[user.uid,initial?.id]);
             useEffect(()=>{
                 const kept=new Set(pending.flatMap(a=>[a.dataUrl,a.thumbnailUrl]).filter(Boolean));
-                for(const url of galleryUrls.current)if(!kept.has(url)){URL.revokeObjectURL(url);galleryUrls.current.delete(url);pendingUrls.current.delete(url);}
+                for(const url of pendingUrls.current)if(!kept.has(url)){URL.revokeObjectURL(url);galleryUrls.current.delete(url);pendingUrls.current.delete(url);}
             }, [pending]);
             useEffect(()=>{
                 if(!recoveringPhotos)return;
@@ -2010,9 +2057,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 .finally(()=>{if(!cancelled){processingRef.current--;if(mounted.current)setProcessing(processingRef.current>0);}});
                 return()=>{cancelled=true;};
             },[]);
-            const cameraCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&!blocked()&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
+            const cameraCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!removingRef.current&&!sealed&&!blocked()&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
             const handleCamera=e=>{
-                if(disposed.current||discardingRef.current||savingRef.current||processingRef.current||stagingRef.current||sealed)return;
+                if(disposed.current||discardingRef.current||savingRef.current||removingRef.current||processingRef.current||stagingRef.current||sealed)return;
                 const file=e.target.files?.[0];e.target.value='';if(!file)return;
                 if(!cameraCurrent()){setImageError('Aktivni nacrt nije dostupan. Fotografija nije dodata.');return;}
                 processingRef.current++;setProcessing(true);setImageError('');setDocumentFile(file);
@@ -2034,9 +2081,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 }catch(e){if(a&&!pendingUrls.current.has(a.dataUrl))URL.revokeObjectURL(a.dataUrl);if(mounted.current&&e.code==='DRAFT_STALE')handleDraftError(e);if(staged&&mounted.current)setImageError(e.message);throw e;}
                 finally{cameraAccepting.current=false;}
             };
-            useEffect(() => { onBusy(saving || discarding || processing || staging || resolving || stale || !!conflict); return () => onBusy(false); }, [saving, discarding, processing, staging, resolving, stale, conflict, onBusy]);
+            useEffect(() => { onBusy(saving || discarding || processing || staging || removing || resolving || stale || !!conflict); return () => onBusy(false); }, [saving, discarding, processing, staging, removing, resolving, stale, conflict, onBusy]);
             useEffect(()=>{
-                if(sealed||savingRef.current||disposed.current||discardingRef.current)return;
+                if(sealed||savingRef.current||removingRef.current||disposed.current||discardingRef.current)return;
                 setPending(previous=>attachmentNames.prepare(previous,[...legacy,...attachments],form.name));
             },[form.name,attachments,pending,sealed]);
             const acknowledgeDraft=draft=>{
@@ -2045,25 +2092,25 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
             useEffect(()=>{
                 const ticket=++stageSequence.current;let cancelled=false;
-                if(!mounted.current||disposed.current||discardingRef.current||savingRef.current||sealed||processingRef.current||blocked()){
+                if(!mounted.current||disposed.current||discardingRef.current||savingRef.current||removingRef.current||sealed||processingRef.current||blocked()){
                     stagingRef.current=false;setStaging(false);return;
                 }
                 stagingRef.current=true;setStaging(true);
-                const current=()=>!cancelled&&ticket===stageSequence.current&&mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&!processingRef.current&&!blocked();
+                const current=()=>!cancelled&&ticket===stageSequence.current&&mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!removingRef.current&&!sealed&&!processingRef.current&&!blocked();
                 const {id,...base}=initial||{};
                 service.stageDraft({userId:user.uid,id:initial?.id||null,base:initial?base:null,metadata:form,attachments,pending,operationId:draftOperation.current,expectedPending:()=>draftPending.current,expectedRevision:()=>draftRevisionRef.current,isCurrent:current,onStaged:acknowledgeDraft})
                     .catch(e=>{if(current()&&e.name!=='AbortError')handleDraftError(e);})
                     .finally(()=>{if(ticket===stageSequence.current){stagingRef.current=false;if(mounted.current)setStaging(false);}});
                 return()=>{cancelled=true;};
-            },[form,attachments,pending,sealed,stale,conflict,resolving,processing]);
-            const change = (field, value) => { if(!sealed && !savingRef.current && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
+            },[form,attachments,pending,sealed,stale,conflict,resolving,processing,removing]);
+            const change = (field, value) => { if(!sealed && !savingRef.current && !removingRef.current && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
             const [qrNotice,setQrNotice]=useState('');
-            const qrCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!sealed&&!blocked()&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
+            const qrCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!removingRef.current&&!sealed&&!blocked()&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
             const applyQR=proposal=>{if(!qrCurrent())return;const result=mergeReceipt(form,proposal);setForm(result.next);const names={name:'naziv',store:'prodavnica',purchaseDate:'datum',purchasePrice:'cena',currency:'valuta',invoiceNumber:'broj računa',fiscalReceiptUrl:'fiskalni link'};setQrNotice(result.kept.length?'Zadržana popunjena polja: '+result.kept.map(k=>names[k]).join(', ')+'.':'Podaci su preneti u formu. Pregledajte ih i dopunite kategoriju i trajanje. Garancija nije sačuvana.');};
             const expiry = calcExp(form.purchaseDate, form.baseMonths, form.extendedMonths);
 
             const handleFile = async e => {
-                if(disposed.current||discardingRef.current||savingRef.current||processingRef.current||stagingRef.current||blocked())return;
+                if(disposed.current||discardingRef.current||savingRef.current||removingRef.current||processingRef.current||stagingRef.current||blocked())return;
                 const files=Array.from(e.target.files||[]);e.target.value='';if(!files.length)return;
                 const controller=new AbortController(),operation=draftOperation.current,revision=draftRevisionRef.current;
                 const live=()=>mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!blocked()&&galleryRun.current===controller&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
@@ -2123,13 +2170,31 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 }
             };
             const changeKind = (id, kind) => {
-                if (sealed || savingRef.current || disposed.current || discardingRef.current) return;
+                if (sealed || savingRef.current || removingRef.current || disposed.current || discardingRef.current) return;
                 setAttachments(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
                 setPending(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
             };
             const changePendingName = (id, value) => {
-                if(sealed||savingRef.current||disposed.current||discardingRef.current)return;
+                if(sealed||savingRef.current||removingRef.current||disposed.current||discardingRef.current)return;
                 setPending(previous=>previous.map(a=>a.id===id?{...a,name:value+(a.extension||attachmentNames.extension(a.mime,a.name)),nameCustom:true,nameTruncated:false}:a));
+            };
+
+            const removePending=async id=>{
+                if(removingRef.current||savingRef.current||processingRef.current||stagingRef.current||documentFile||sealed||disposed.current||discardingRef.current||blocked())return;
+                const target=pending.find(a=>a.id===id);if(!target)return;
+                const text='Ukloniti „'+target.name+'“ iz ovog nacrta? Ostali podaci i prilozi ostaju. Fajlovi na Drive-u se ne brišu.'+(target.documentPhoto?' Biće uklonjena i lokalna kopija ove potvrđene fotografije. Ako je nemate sačuvanu drugde, moraćete ponovo da je fotografišete.':' Izvorna datoteka na uređaju ostaje nepromenjena.');
+                if(!window.confirm(text))return;
+                removingRef.current=true;setRemoving(true);setRemovalNotice('');setImageError('');stageSequence.current++;
+                const current=()=>mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!blocked()&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
+                try{
+                    const result=await service.removePendingAttachment({userId:user.uid,operationId:draftOperation.current,attachmentId:id,expectedRevision:()=>draftRevisionRef.current,expectedPending:()=>draftPending.current,expectedMetadata:form,expectedAttachments:attachments,isCurrent:current});
+                    if(!current())return;
+                    acknowledgeDraft(result.draft);
+                    setPending(previous=>result.draft.pending.map(meta=>({...previous.find(a=>a.id===meta.id&&a.sha256===meta.sha256),...meta})));
+                    setRemovalNotice(result.localCopyRetained?'Prilog je uklonjen iz nacrta. Lokalna kopija čeka čišćenje.':'Prilog je uklonjen iz nacrta.');
+                    requestAnimationFrame(()=>{if(current())document.getElementById('attachment-section')?.focus({preventScroll:true});});
+                }catch(e){if(current())handleDraftError(e);}
+                finally{removingRef.current=false;if(mounted.current)setRemoving(false);}
             };
 
             const applyLoadedDraft=async draft=>{
@@ -2155,20 +2220,20 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 }finally{if(!applied)for(const url of created)URL.revokeObjectURL(url);}
             };
             const reloadDraft=async()=>{
-                if(resolutionRef.current||!window.confirm('Zameni prikaz ove kartice aktuelnim nacrtom? Izmene koje ova kartica nije uspela da upiše biće napuštene. Sačuvani nacrt i njegovi prilozi neće biti obrisani.'))return;
+                if(removingRef.current||resolutionRef.current||!window.confirm('Zameni prikaz ove kartice aktuelnim nacrtom? Izmene koje ova kartica nije uspela da upiše biće napuštene. Sačuvani nacrt i njegovi prilozi neće biti obrisani.'))return;
                 resolutionRef.current=true;setResolving(true);stageSequence.current++;
                 try{const d=service.getDraft(user.uid);if(!d||d.operationId!==draftOperation.current)throw Error('Ovaj nacrt više nije aktivan. Zatvorite zastareli prikaz.');await applyLoadedDraft(d);}
                 catch(e){if(mounted.current)handleDraftError(e);}
                 finally{resolutionRef.current=false;if(mounted.current)setResolving(false);}
             };
             const inspectConflict=async()=>{
-                if(resolutionRef.current)return;resolutionRef.current=true;setResolving(true);stageSequence.current++;
+                if(removingRef.current||resolutionRef.current)return;resolutionRef.current=true;setResolving(true);stageSequence.current++;
                 try{const plan=await service.prepareDraftConflict({userId:user.uid,operationId:draftOperation.current,expectedRevision:()=>draftRevisionRef.current});if(mounted.current){conflictRef.current=plan;setConflict(plan);setChoices({});setError('');}}
                 catch(e){if(mounted.current)handleDraftError(e);}
                 finally{resolutionRef.current=false;if(mounted.current)setResolving(false);}
             };
             const resolveConflict=async discard=>{
-                if(resolutionRef.current||!conflictRef.current)return;
+                if(removingRef.current||resolutionRef.current||!conflictRef.current)return;
                 if(discard&&!window.confirm('Odbaci samo ovaj lokalni nacrt i njegove lokalne fotografije? Noviji zapis i fajlovi na Drive-u ostaju nepromenjeni.'))return;
                 resolutionRef.current=true;setResolving(true);stageSequence.current++;
                 try{
@@ -2184,7 +2249,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 e.preventDefault();
                 if (disposed.current || discardingRef.current) return;
                 if (draftConflict) { setError(draftConflictMessage); return; }
-                if (savingRef.current || processingRef.current || blocked()) return;
+                if (savingRef.current || removingRef.current || processingRef.current || blocked()) return;
                 if (!form.name.trim() || !expiry || form.purchaseDate > dateInput() || form.description.length > 150) {
                     setError('Unesite naziv, ispravan datum kupovine koji nije u budućnosti, celo trajanje u mesecima i opis do 150 karaktera.');
                     return;
@@ -2219,7 +2284,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
 
             const discard = async () => {
-                if (disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current || sealed) return;
+                if (disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current || removingRef.current || sealed) return;
                 discardingRef.current = true; setDiscarding(true);
                 try {
                     const d = service.getDraft(user.uid);
@@ -2243,7 +2308,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             if (draftConflict) return <div role="alert" className="bg-white p-6 rounded-2xl border max-w-xl mx-auto"><p>{draftConflictMessage}</p><button type="button" onClick={onCancel} className="mt-4 border rounded-xl px-3 py-2">Nazad</button></div>;
 
             return (
-                <form onSubmit={submit} aria-busy={saving || processing || discarding} className="form-shell gp-form">
+                <form onSubmit={submit} aria-busy={saving || processing || discarding || removing} className="form-shell gp-form">
                     {documentFile&&<DocumentEditor file={documentFile} onConfirm={confirmDocument} onCancel={closeDocument}/>}
                     <div className="form-heading"><p className="section-label">{initial ? 'IZMENA POSTOJEĆE GARANCIJE' : 'NOVI UNOS GARANCIJE'}</p><h1 data-page-heading tabIndex={-1}>{initial ? 'Izmena garancije' : 'Dodaj proizvod'}</h1></div>
                     <p className="text-sm mb-3">Podaci obrasca čuvaju se lokalno. Odustani zatvara formu i zadržava nacrt.</p>
@@ -2256,7 +2321,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         {conflict.canRebase&&conflict.fields.map(row=><div key={row.key}><strong>{row.label}</strong><p>Moj unos: {conflictValue(row.key,row.local)}</p><p>Noviji zapis: {conflictValue(row.key,row.current)}</p>{row.conflict?<label>Vrednost za {row.label}<select disabled={resolving} value={choices[row.key]||''} onChange={e=>setChoices(old=>({...old,[row.key]:e.target.value}))}><option value="">Izaberite vrednost</option><option value="local">Zadrži moj unos</option><option value="current">Preuzmi iz novijeg zapisa</option></select></label>:<p>Izmene ovog polja mogu bezbedno da se usklade.</p>}</div>)}
                         <div className="row">{conflict.canRebase&&<button type="button" disabled={resolving||conflict.fields.some(f=>f.conflict&&!choices[f.key])} onClick={()=>resolveConflict(false)}>Primeni razrešenje u nacrtu</button>}<button type="button" disabled={resolving} onClick={inspectConflict}>Osveži pregled konflikta</button><button type="button" disabled={resolving} onClick={()=>{conflictRef.current=null;setConflict(null);}}>Zadrži nacrt bez razrešenja</button><button type="button" disabled={resolving} onClick={()=>resolveConflict(true)}>Odbaci samo ovaj lokalni nacrt</button></div>
                     </section>}
-                    <fieldset disabled={saving || discarding || resolving || stale || !!conflict} className="space-y-4">
+                    <fieldset disabled={saving || discarding || removing || resolving || stale || !!conflict} className="space-y-4">
                         {!initial&&<ReceiptQR disabled={saving||processing||discarding||sealed} isCurrent={qrCurrent} onApply={applyQR}/>}
                         {qrNotice&&<p role="status">{qrNotice}</p>}
                         <section className="form-block"><h2>Podaci o proizvodu</h2><div className="form-grid"><label className="block full">Naziv proizvoda
@@ -2299,15 +2364,17 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         <details className="small muted"><summary>Granice galerije i nacrt</summary><p>Do 5 slika i 30 MiB po izboru, 10 MiB po novoj slici; do 10 novih galerijskih priloga i 50 MiB njihovih originala uz nacrt. Do 24 megapiksela i 20.000 px po strani. JPEG/PNG proveravamo pre otvaranja; GIF, WebP, BMP i AVIF tek posle dekodiranja. Memorija pregledača time nije garantovano ograničena.</p></details>
                         {pending.some(a=>a.documentPhoto!==true)&&<p className="small muted">Galerija: nacrt pamti podatke i hash, ne i originalne slike. Posle osvežavanja ponovo izaberite iste originale.</p>}
                         {pending.some(a=>a.documentPhoto===true&&a.original)&&<p className="small muted">Dokumenti: potvrđene fotografije imaju lokalnu kopiju uz nacrt. Brisanje podataka sajta može ukloniti te kopije.</p>}
-                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} />
+                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} onRemovePending={sealed?null:removePending} removeDisabled={saving||processing||staging||removing||!!documentFile||blocked()} />
+                        {removalNotice&&<p role="status">{removalNotice}</p>}
+                        <LocalPhotoCleanup user={user} disabled={saving||processing||staging||removing||sealed||blocked()} onComplete={()=>setRemovalNotice('Lokalna kopija je uklonjena.')}/>
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
                         {imageError && <p role="alert" className="text-red-700">{imageError}</p>}
                         </section><div className="form-actions">
-                            <button type="button" disabled={saving||processing||discarding||staging} onClick={onCancel} className="flex-1 py-3 border border-slate-300 rounded-xl font-bold text-slate-500">Odustani</button>
-                            <button type="submit" disabled={saving || processing} className="primary flex-1 py-3 font-bold disabled:opacity-50">{saving ? 'Čuvanje...' : error ? 'Pokušaj ponovo' : 'Sačuvaj'}</button>
+                            <button type="button" disabled={saving||processing||discarding||staging||removing} onClick={onCancel} className="flex-1 py-3 border border-slate-300 rounded-xl font-bold text-slate-500">Odustani</button>
+                            <button type="submit" disabled={saving || processing || removing} className="primary flex-1 py-3 font-bold disabled:opacity-50">{saving ? 'Čuvanje...' : error ? 'Pokušaj ponovo' : 'Sačuvaj'}</button>
                         </div>
                         <div className="border-t pt-4">
-                            <button type="button" onClick={discard} disabled={saving || processing || staging || discarding || sealed} className="w-full min-w-0 min-h-[48px] whitespace-normal break-words px-4 py-3 border border-red-300 text-red-700 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed">Odbaci nacrt</button>
+                            <button type="button" onClick={discard} disabled={saving || processing || staging || removing || discarding || sealed} className="w-full min-w-0 min-h-[48px] whitespace-normal break-words px-4 py-3 border border-red-300 text-red-700 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed">Odbaci nacrt</button>
                         </div>
                     </fieldset>
                 </form>
