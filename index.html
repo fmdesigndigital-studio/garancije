@@ -24,6 +24,11 @@
         .warranty-card-category { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
         .warranty-card-status { flex-shrink: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
         .warranty-card-title { white-space: normal; overflow-wrap: anywhere; }
+        body.gp-ui .app-header{position:relative}
+        body.gp-ui .tab-presence[hidden],body.gp-ui .tab-presence-panel[hidden]{display:none}
+        body.gp-ui .header-right .tab-presence-trigger{display:inline-flex;align-items:center;justify-content:center;gap:.3rem;min-width:44px;min-height:44px;padding:.45rem .5rem;font-size:.75rem;background:#f3f7fc;color:#294c78}
+        body.gp-ui .tab-presence-panel{position:absolute;z-index:30;top:calc(100% + 6px);right:max(20px,calc((100% - 1120px)/2 + 24px));width:min(28rem,calc(100vw - 40px));padding:14px;display:grid;gap:10px;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 24px #142d5226}
+        body.gp-ui .tab-presence-panel>button{justify-self:start;min-height:44px}
         .attachment-list { min-width: 0; overflow-wrap: anywhere; }
         body.gp-ui .gp-attachment .pending-remove { min-width:44px; min-height:44px; }
         .attachment-open-button { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
@@ -1535,7 +1540,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.27.6';
+        const RELEASE_VERSION = '2026.10.28.1';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -1798,6 +1803,86 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             </section>;
         }
 
+        function TabPresence() {
+            const [fresh,setFresh]=useState(false),[open,setOpen]=useState(false);
+            const host=useRef(null),trigger=useRef(null),panelId='tab-presence-'+React.useId().replace(/:/g,'');
+            useEffect(()=>{
+                let disposed=false,channel=null,identity=null,pending=null,lastProbe=-Infinity,until=0,interval,pendingTimer,expiryTimer;
+                const replied=new Set(),now=()=>performance.now(),validId=value=>typeof value==='string'&&/^[a-f0-9-]{36}$/i.test(value);
+                const hide=()=>{
+                    if(host.current?.contains(document.activeElement)){
+                        const next=host.current.nextElementSibling;
+                        (next&&!next.disabled?next:document.getElementById('app-main'))?.focus({preventScroll:true});
+                    }
+                    until=0;if(!disposed){setFresh(false);setOpen(false);}
+                };
+                const pause=()=>{
+                    clearInterval(interval);clearTimeout(pendingTimer);clearTimeout(expiryTimer);
+                    interval=pendingTimer=expiryTimer=undefined;pending=null;lastProbe=-Infinity;
+                    hide();
+                };
+                const stop=()=>{
+                    pause();identity=null;replied.clear();
+                    const previous=channel;channel=null;try{previous?.close();}catch{}
+                };
+                const send=data=>{try{channel.postMessage(data);return true;}catch{stop();return false;}};
+                const probe=()=>{
+                    if(disposed||!channel||document.visibilityState!=='visible')return;
+                    if(until&&now()>=until)hide();
+                    if(pending||now()-lastProbe<2000)return;
+                    const nonce=crypto.randomUUID();lastProbe=now();pending={nonce,expires:now()+2000};
+                    clearTimeout(pendingTimer);pendingTimer=setTimeout(()=>{pending=null;},2000);
+                    send({v:1,type:'challenge',sender:identity,nonce});
+                };
+                const start=()=>{
+                    if(disposed||typeof BroadcastChannel!=='function'||typeof crypto.randomUUID!=='function')return;
+                    if(channel){probe();if(channel&&document.visibilityState==='visible'&&interval===undefined)interval=setInterval(probe,10000);return;}
+                    try{
+                        identity=crypto.randomUUID();lastProbe=-Infinity;
+                        const current=new BroadcastChannel('garancijepro-tab-presence-v1');channel=current;
+                        current.onmessage=event=>{
+                            if(disposed||channel!==current)return;
+                            if(until&&now()>=until)hide();
+                            const data=event.data;
+                            if(!data||data.v!==1||!validId(data.sender)||data.sender===identity||!validId(data.nonce))return;
+                            if(data.type==='challenge'){
+                                if(replied.has(data.nonce))return;
+                                replied.add(data.nonce);if(replied.size>32)replied.delete(replied.values().next().value);
+                                if(send({v:1,type:'ack',sender:identity,to:data.sender,nonce:data.nonce})&&document.visibilityState==='visible'){
+                                    if(pending&&now()<pending.expires)send({v:1,type:'challenge',sender:identity,nonce:pending.nonce});
+                                    else{pending=null;clearTimeout(pendingTimer);probe();}
+                                }
+                            }else if(data.type==='ack'&&document.visibilityState==='visible'&&data.to===identity&&pending?.nonce===data.nonce&&now()<pending.expires){
+                                pending=null;clearTimeout(pendingTimer);until=now()+30000;
+                                setFresh(true);clearTimeout(expiryTimer);expiryTimer=setTimeout(hide,30000);
+                            }
+                        };
+                        current.onmessageerror=stop;probe();if(channel&&document.visibilityState==='visible')interval=setInterval(probe,10000);
+                    }catch{stop();}
+                };
+                const visibility=()=>{if(document.visibilityState==='visible')start();else pause();};
+                const pageShow=()=>start();
+                document.addEventListener('visibilitychange',visibility);window.addEventListener('pagehide',stop);window.addEventListener('pageshow',pageShow);
+                start();
+                return()=>{disposed=true;stop();document.removeEventListener('visibilitychange',visibility);window.removeEventListener('pagehide',stop);window.removeEventListener('pageshow',pageShow);};
+            },[]);
+            useEffect(()=>{
+                if(!open)return;
+                const outside=event=>{if(!host.current?.contains(event.target))setOpen(false);};
+                const escape=event=>{if(event.key==='Escape'){setOpen(false);trigger.current?.focus({preventScroll:true});}};
+                document.addEventListener('pointerdown',outside);document.addEventListener('keydown',escape);
+                return()=>{document.removeEventListener('pointerdown',outside);document.removeEventListener('keydown',escape);};
+            },[open]);
+            return <div ref={host} className="tab-presence" hidden={!fresh}>
+                <button ref={trigger} type="button" className="tab-presence-trigger" aria-expanded={open} aria-controls={panelId} onClick={()=>setOpen(v=>!v)}><span aria-hidden="true"><Icon name="copy"/></span>Druga kartica</button>
+                <div id={panelId} className="tab-presence-panel" role="note" aria-label="O radu u više kartica" hidden={!open}>
+                    <p>Nedavno je otkrivena druga kartica ili prozor GarancijePro. Unos nastavi u jednoj kartici.</p>
+                    <p className="small muted">Uspavana kartica ili stara verzija možda neće biti otkrivena. Odsustvo oznake ne potvrđuje da je ovo jedina kartica.</p>
+                    <button type="button" onClick={()=>{setOpen(false);trigger.current?.focus({preventScroll:true});}}>Razumem</button>
+                </div>
+            </div>;
+        }
+
         function App() {
             const [warranties, setWarranties] = useState([]);
             const [user, setUser] = useState(null);
@@ -1953,7 +2038,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <a href="#app-main" className="skip-link">Pređi na sadržaj</a>
                 <header className="app-header"><div className="gp-container header-inner">
                     <button type="button" className="brand quiet" disabled={formBusy} onClick={()=>navigate('list')}><span className="brand-mark"><Icon name="shield-check"/></span><span>GarancijePro</span></button>
-                    <div className="header-right"><button type="button" aria-label="Podešavanja" disabled={formBusy} onClick={()=>navigate('settings')}><Icon name="settings"/></button></div>
+                    <div className="header-right"><TabPresence/><button type="button" aria-label="Podešavanja" disabled={formBusy} onClick={()=>navigate('settings')}><Icon name="settings"/></button></div>
                 </div></header>
                 <main className="gp-container" id="app-main" ref={mainRef} tabIndex={-1}>
                     {notice&&<p role="status" className="toast">{notice}</p>}{authError&&<p role="alert" className="error">{authError}</p>}
