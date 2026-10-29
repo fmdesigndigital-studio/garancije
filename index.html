@@ -25,6 +25,8 @@
         .warranty-card-status { flex-shrink: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
         .warranty-card-title { white-space: normal; overflow-wrap: anywhere; }
         body.gp-ui .app-header{position:relative}
+        body.gp-ui .header-right .settings-button{position:relative}
+        body.gp-ui .header-right .settings-button>.settings-icon{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}
         body.gp-ui .tab-presence[hidden],body.gp-ui .tab-presence-panel[hidden]{display:none}
         body.gp-ui .header-right .tab-presence-trigger{display:inline-flex;align-items:center;justify-content:center;gap:.3rem;min-width:44px;min-height:44px;padding:.45rem .5rem;font-size:.75rem;background:#f3f7fc;color:#294c78}
         body.gp-ui .tab-presence-panel{position:absolute;z-index:30;top:calc(100% + 6px);right:max(20px,calc((100% - 1120px)/2 + 24px));width:min(28rem,calc(100vw - 40px));padding:14px;display:grid;gap:10px;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 8px 24px #142d5226}
@@ -1603,7 +1605,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.29.2';
+        const RELEASE_VERSION = '2026.10.29.3';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2121,7 +2123,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <a href="#app-main" className="skip-link">Pređi na sadržaj</a>
                 <header className="app-header"><div className="gp-container header-inner">
                     <button type="button" className="brand quiet" disabled={formBusy} onClick={()=>navigate('list')}><span className="brand-mark"><Icon name="shield-check"/></span><span>GarancijePro</span></button>
-                    <div className="header-right"><TabPresence/><button type="button" aria-label="Podešavanja" disabled={formBusy} onClick={()=>navigate('settings')}><Icon name="settings"/></button></div>
+                    <div className="header-right"><TabPresence/><button type="button" className="settings-button" aria-label="Podešavanja" disabled={formBusy} onClick={()=>navigate('settings')}><svg viewBox="0 0 24 24" aria-hidden="true"/><span className="settings-icon" aria-hidden="true"><Icon name="settings"/></span></button></div>
                 </div></header>
                 <main className="gp-container" id="app-main" ref={mainRef} tabIndex={-1}>
                     {notice&&<p role="status" className="toast">{notice}</p>}{authError&&<p role="alert" className="error">{authError}</p>}
