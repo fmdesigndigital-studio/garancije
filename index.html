@@ -144,6 +144,10 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         .document-editor button:disabled { opacity:.5; }
         .document-toolbar { display:flex; align-items:center; gap:.25rem; flex:none; }
         .document-toolbar h2 { flex:1; font-size:1rem; min-width:0; }
+        .document-corner-choices { display:flex; flex:none; gap:2px; }
+        body.gp-ui .document-editor .document-corner-choice { display:grid; place-items:center; flex:none; width:44px; height:44px; max-width:none; padding:0; border:1px solid #94a3b8; border-radius:.4rem; }
+        body.gp-ui .document-editor .document-corner-choice svg { width:20px; height:20px; }
+        body.gp-ui .document-editor .document-corner-choice[aria-pressed=true] { background:#dbeafe; border-color:#1857cf; outline:2px solid #1857cf; outline-offset:-3px; }
         .document-editor .document-toolbar button { min-height:44px; min-width:44px; padding:.3rem .5rem; line-height:1.2; font-size:.9rem; }
         .document-info { position:absolute; inset:0; z-index:2; overflow:auto; padding:.75rem; background:#fff; line-height:1.4; }
         .document-info[hidden] { display:none; }
@@ -1335,7 +1339,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         })();
 
         function DocumentEditor({file,onConfirm,onCancel}) {
-            const dialog=useRef(null),alive=useRef(true),controller=useRef(null),sourceRef=useRef(null),resultUrl=useRef(null),busyRef=useRef(false),acceptingRef=useRef(false),displayRef=useRef(null),stageRef=useRef(null),previewBackRef=useRef(null),previewButtonRef=useRef(null),viewRef=useRef(false),infoButtonRef=useRef(null),infoCloseRef=useRef(null),infoViewRef=useRef(false),cornerGesture=useRef(null),photoGesture=useRef(null);
+            const dialog=useRef(null),alive=useRef(true),controller=useRef(null),sourceRef=useRef(null),resultUrl=useRef(null),busyRef=useRef(false),acceptingRef=useRef(false),displayRef=useRef(null),stageRef=useRef(null),previewBackRef=useRef(null),previewButtonRef=useRef(null),viewRef=useRef(false),infoButtonRef=useRef(null),infoCloseRef=useRef(null),infoViewRef=useRef(false),cornerGesture=useRef(null),photoGesture=useRef(null),sheetRef=useRef(null),placeNext=useRef(null),choiceGesture=useRef(null);
+            const cornerNames=['Gornji levi ugao','Gornji desni ugao','Donji desni ugao','Donji levi ugao'];
             const [source,setSource]=useState(null),[points,setPoints]=useState([{x:.02,y:.02},{x:.98,y:.02},{x:.98,y:.98},{x:.02,y:.98}]),[turns,setTurns]=useState(0),[selectedCorner,setSelectedCorner]=useState(null);
             const [result,setResult]=useState(null),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[error,setError]=useState(''),[zoom,setZoom]=useState(false);
             const [status,setStatus]=useState('Pripremam fotografiju…'),[showPreview,setShowPreview]=useState(false),[showInfo,setShowInfo]=useState(false),[stageSize,setStageSize]=useState({width:0,height:0});
@@ -1354,11 +1359,66 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             useEffect(()=>{if(showInfo)infoCloseRef.current?.focus();else if(infoViewRef.current)infoButtonRef.current?.focus();infoViewRef.current=showInfo;},[showInfo]);
             const sheetWidth=source?Math.max(1,Math.min(Math.max(1,stageSize.width-44),Math.max(1,stageSize.height-44)*source.canvas.width/source.canvas.height)):0;
             const move=(index,x,y)=>{if(busyRef.current||loading)return;clearResult();setError('');setPoints(old=>old.map((p,i)=>i===index?{x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y))}:p));};
-            const cornerDown=(e,index)=>{e.stopPropagation();if(busyRef.current||loading||!e.isPrimary||e.button!==0)return;e.preventDefault();photoGesture.current=null;setSelectedCorner(index);e.currentTarget.focus();cornerGesture.current={id:e.pointerId,index,x:e.clientX,y:e.clientY,moved:false};e.currentTarget.setPointerCapture(e.pointerId);};
-            const pointer=(e,index)=>{e.stopPropagation();const g=cornerGesture.current;if(!g||g.id!==e.pointerId||g.index!==index||!e.currentTarget.hasPointerCapture(e.pointerId)||showInfo||showPreview)return;if(!g.moved&&Math.hypot(e.clientX-g.x,e.clientY-g.y)<=4)return;g.moved=true;const r=e.currentTarget.parentElement.getBoundingClientRect();move(index,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height);};
-            const cornerEnd=e=>{e.stopPropagation();if(cornerGesture.current?.id===e.pointerId)cornerGesture.current=null;photoGesture.current=null;if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);};
-            const photoDown=e=>{photoGesture.current=null;if(busyRef.current||loading||showInfo||showPreview||selectedCorner===null||!e.isPrimary||e.button!==0)return;photoGesture.current={id:e.pointerId,x:e.clientX,y:e.clientY,moved:false};};
-            const place=e=>{const g=photoGesture.current;photoGesture.current=null;if(!g||g.id!==e.pointerId||g.moved||Math.hypot(e.clientX-g.x,e.clientY-g.y)>8||busyRef.current||loading||showInfo||showPreview||selectedCorner===null||!source)return;const r=e.currentTarget.getBoundingClientRect(),x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||x>1||y<0||y>1)return;const next=points.map((p,i)=>i===selectedCorner?{x,y}:p);try{documentImage.geometry(next,source.canvas.width,source.canvas.height);}catch(error){setError(error.message);return;}move(selectedCorner,x,y);};
+            const chooseCorner=(index,precise=false)=>{
+                if(busyRef.current||loading||showInfo||showPreview)return;
+                cornerGesture.current=photoGesture.current=null;placeNext.current=precise?index:null;setSelectedCorner(index);
+            };
+            const choiceDown=(e,index)=>{
+                if(busyRef.current||loading||showInfo||showPreview||!e.isPrimary||e.button!==0)return;
+                e.preventDefault();choiceGesture.current={id:e.pointerId,index,x:e.clientX,y:e.clientY,moved:false};e.currentTarget.focus();e.currentTarget.setPointerCapture(e.pointerId);
+            };
+            const choiceMove=e=>{const g=choiceGesture.current;if(g?.id===e.pointerId&&Math.hypot(e.clientX-g.x,e.clientY-g.y)>8)g.moved=true;};
+            const choiceEnd=e=>{
+                const g=choiceGesture.current;if(!g||g.id!==e.pointerId)return;choiceGesture.current=null;
+                const r=e.currentTarget.getBoundingClientRect();
+                if(e.type==='pointerup'&&!g.moved&&Math.hypot(e.clientX-g.x,e.clientY-g.y)<=8&&e.clientX>=r.left&&e.clientX<=r.right&&e.clientY>=r.top&&e.clientY<=r.bottom)chooseCorner(g.index,true);
+                if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);
+            };
+            const closestCorner=e=>{
+                const nodes=[...(sheetRef.current?.querySelectorAll('.document-corner')||[])];let index=-1,distance=Infinity;
+                nodes.forEach((node,i)=>{const r=node.getBoundingClientRect(),d=(e.clientX-r.left-r.width/2)**2+(e.clientY-r.top-r.height/2)**2;if(d<distance||d===distance&&i===selectedCorner){distance=d;index=i;}});
+                const glyph=nodes[index]?.querySelector('svg')?.getBoundingClientRect();
+                return {index,node:nodes[index],onGlyph:!!glyph&&e.clientX>=glyph.left&&e.clientX<=glyph.right&&e.clientY>=glyph.top&&e.clientY<=glyph.bottom};
+            };
+            const photoDown=(e,index=selectedCorner,dragIndex)=>{
+                if(!e.isPrimary||e.button!==0)return;photoGesture.current=null;
+                if(busyRef.current||loading||showInfo||showPreview||index===null)return;
+                photoGesture.current={id:e.pointerId,index,dragIndex,x:e.clientX,y:e.clientY,moved:false};
+            };
+            const cornerDown=e=>{
+                e.stopPropagation();if(busyRef.current||loading||showInfo||showPreview||!e.isPrimary||e.button!==0)return;e.preventDefault();
+                if(placeNext.current!==null){
+                    const index=placeNext.current,r=sheetRef.current?.querySelectorAll('.document-corner')[index]?.getBoundingClientRect();
+                    const dragIndex=r&&e.clientX>=r.left&&e.clientX<=r.right&&e.clientY>=r.top&&e.clientY<=r.bottom?index:undefined;
+                    photoDown(e,index,dragIndex);e.currentTarget.setPointerCapture(e.pointerId);return;
+                }
+                const picked=closestCorner(e);if(picked.index<0)return;
+                if(selectedCorner!==null&&!picked.onGlyph){photoDown(e,selectedCorner,picked.index);e.currentTarget.setPointerCapture(e.pointerId);return;}
+                chooseCorner(picked.index);picked.node.focus();cornerGesture.current={id:e.pointerId,index:picked.index,x:e.clientX,y:e.clientY,moved:false};e.currentTarget.setPointerCapture(e.pointerId);
+            };
+            const pointer=e=>{
+                e.stopPropagation();const photo=photoGesture.current;
+                if(photo?.id===e.pointerId){
+                    if(photo.dragIndex!==undefined&&Math.hypot(e.clientX-photo.x,e.clientY-photo.y)>4){photoGesture.current=null;placeNext.current=null;setSelectedCorner(photo.dragIndex);cornerGesture.current={id:e.pointerId,index:photo.dragIndex,x:photo.x,y:photo.y,moved:true};}
+                    else{if(Math.hypot(e.clientX-photo.x,e.clientY-photo.y)>8)photo.moved=true;return;}
+                }
+                const g=cornerGesture.current;if(!g||g.id!==e.pointerId||!e.currentTarget.hasPointerCapture(e.pointerId)||showInfo||showPreview)return;
+                if(!g.moved&&Math.hypot(e.clientX-g.x,e.clientY-g.y)<=4)return;g.moved=true;
+                const r=sheetRef.current?.getBoundingClientRect();if(r)move(g.index,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height);
+            };
+            const place=e=>{
+                const g=photoGesture.current;if(!g||g.id!==e.pointerId)return;photoGesture.current=null;
+                if(g.moved||Math.hypot(e.clientX-g.x,e.clientY-g.y)>8||busyRef.current||loading||showInfo||showPreview||!source)return;
+                const r=sheetRef.current?.getBoundingClientRect();if(!r)return;const x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;
+                if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||x>1||y<0||y>1)return;
+                const next=points.map((p,i)=>i===g.index?{x,y}:p);try{documentImage.geometry(next,source.canvas.width,source.canvas.height);}catch(error){setError(error.message);return;}
+                placeNext.current=null;setSelectedCorner(g.index);move(g.index,x,y);
+            };
+            const cornerEnd=e=>{
+                e.stopPropagation();if(e.type==='pointerup')place(e);else if(photoGesture.current?.id===e.pointerId)photoGesture.current=null;
+                if(cornerGesture.current?.id===e.pointerId)cornerGesture.current=null;
+                if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);
+            };
             const rotate=()=>{if(busyRef.current||loading||!result)return;preview((turns+1)%4);};
             const preview=async(nextTurns=turns)=>{
                 if(busyRef.current||!source)return;
@@ -1379,20 +1439,23 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <header className="document-toolbar">
                     {showPreview&&<button ref={previewBackRef} type="button" aria-label="Nazad na sečenje" disabled={busy} onClick={()=>{setShowPreview(false);setZoom(false);setStatus('');}}>←</button>}
                     <h2 id="document-title">{showPreview?'Pregled':'Iseci'}</h2>
+                    {!showPreview&&<div className="document-corner-choices" role="group" aria-label="Izbor ugla">
+                        {cornerNames.map((name,i)=><button key={name} type="button" className="document-corner-choice" aria-label={'Izaberi '+name.toLowerCase()} aria-describedby="document-keyboard" aria-pressed={selectedCorner===i} title={name} disabled={busy||loading||showInfo} onPointerDown={e=>choiceDown(e,i)} onPointerMove={choiceMove} onPointerUp={choiceEnd} onPointerCancel={choiceEnd} onLostPointerCapture={e=>{if(choiceGesture.current?.id===e.pointerId)choiceGesture.current=null;}} onClick={e=>{if(e.detail===0&&!e.nativeEvent.pointerType)chooseCorner(i,true);}}><svg viewBox="0 0 20 20" aria-hidden="true" style={{transform:'rotate('+i*90+'deg)'}}><path d="M5 15V5h10M5 5l10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg></button>)}
+                    </div>}
                     {showPreview&&<><button type="button" aria-label="Rotiraj 90°" title={'Rotacija izlaza: '+turns*90+'°'} disabled={busy} onClick={rotate}>↻ 90°</button><button type="button" disabled={busy} onClick={()=>setZoom(v=>!v)}>{zoom?'Uklopi':'Uvećaj'}</button></>}
                     <button ref={infoButtonRef} type="button" aria-label="Uputstva i detalji" aria-expanded={showInfo} aria-controls="document-info" onClick={()=>setShowInfo(v=>!v)}>ⓘ</button>
                 </header>
                 {status&&<p className="document-status" role="status" aria-live="polite">{status}</p>}
                 <div className="document-stage" ref={stageRef} aria-busy={busy||loading}>
-                    {source&&<div className="document-sheet" style={{width:sheetWidth,display:showPreview?'none':undefined}} inert={showInfo?'':undefined} onPointerDown={photoDown} onPointerMove={e=>{const g=photoGesture.current;if(g&&g.id===e.pointerId&&Math.hypot(e.clientX-g.x,e.clientY-g.y)>8)g.moved=true;}} onPointerUp={place} onPointerCancel={()=>{photoGesture.current=null;}}>
+                    {source&&<div className="document-sheet" ref={sheetRef} style={{width:sheetWidth,display:showPreview?'none':undefined}} inert={showInfo?'':undefined} onPointerDown={e=>photoDown(e)} onPointerMove={e=>{const g=photoGesture.current;if(g&&g.id===e.pointerId&&Math.hypot(e.clientX-g.x,e.clientY-g.y)>8)g.moved=true;}} onPointerUp={place} onPointerCancel={e=>{if(photoGesture.current?.id===e.pointerId)photoGesture.current=null;}}>
                         <canvas aria-label="Fotografija sa četiri ugla" ref={displayRef}/>
                         <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true"><polygon points={points.map(p=>p.x*1000+','+p.y*1000).join(' ')} fill="rgba(250,204,21,.08)" stroke="#fde047" strokeWidth="2" vectorEffect="non-scaling-stroke"/></svg>
-                        {points.map((p,i)=><button key={i} type="button" className="document-corner" style={{left:p.x*100+'%',top:p.y*100+'%'}} aria-label={['Gornji levi ugao','Gornji desni ugao','Donji desni ugao','Donji levi ugao'][i]} aria-describedby="document-keyboard" aria-pressed={selectedCorner===i} disabled={busy||loading} onFocus={()=>setSelectedCorner(i)} onPointerDown={e=>cornerDown(e,i)} onPointerMove={e=>pointer(e,i)} onPointerUp={cornerEnd} onPointerCancel={cornerEnd} onLostPointerCapture={e=>{if(cornerGesture.current?.id===e.pointerId)cornerGesture.current=null;}} onClick={e=>{e.stopPropagation();setSelectedCorner(i);}} onKeyDown={e=>{const d=e.shiftKey ? .02 : .005;if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();move(i,p.x+(e.key==='ArrowRight'?d:e.key==='ArrowLeft'?-d:0),p.y+(e.key==='ArrowDown'?d:e.key==='ArrowUp'?-d:0));}}}><svg viewBox="0 0 26 26" aria-hidden="true"><path d="M13 2v22M2 13h22" fill="none" stroke="#0f172a" strokeWidth="4" strokeLinecap="round"/><path d="M13 2v22M2 13h22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg></button>)}
+                        {points.map((p,i)=><button key={i} type="button" className="document-corner" style={{left:p.x*100+'%',top:p.y*100+'%'}} aria-label={cornerNames[i]} aria-describedby="document-keyboard" aria-pressed={selectedCorner===i} disabled={busy||loading} onFocus={()=>{if(!photoGesture.current){placeNext.current=null;setSelectedCorner(i);}}} onPointerDown={cornerDown} onPointerMove={pointer} onPointerUp={cornerEnd} onPointerCancel={cornerEnd} onLostPointerCapture={e=>{if(cornerGesture.current?.id===e.pointerId)cornerGesture.current=null;if(photoGesture.current?.id===e.pointerId)photoGesture.current=null;}} onClick={e=>{e.stopPropagation();if(e.detail===0&&!e.nativeEvent.pointerType)chooseCorner(i);}} onKeyDown={e=>{const d=e.shiftKey ? .02 : .005;if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();move(i,p.x+(e.key==='ArrowRight'?d:e.key==='ArrowLeft'?-d:0),p.y+(e.key==='ArrowDown'?d:e.key==='ArrowUp'?-d:0));}}}><svg viewBox="0 0 26 26" aria-hidden="true"><path d="M13 2v22M2 13h22" fill="none" stroke="#0f172a" strokeWidth="4" strokeLinecap="round"/><path d="M13 2v22M2 13h22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg></button>)}
                     </div>}
                     {showPreview&&result&&<div className={'document-result'+(zoom?' document-zoom':'')} tabIndex="0" inert={showInfo?'':undefined} aria-label="Pregled obrađenog dokumenta"><img src={result.url} alt="Obrađeni dokument — proveri čitljivost teksta" style={zoom?{width:result.width}:undefined}/></div>}
                     <section id="document-info" className="document-info" aria-label="Uputstva i detalji" hidden={!showInfo}>
                         <div className="document-actions"><button ref={infoCloseRef} type="button" onClick={()=>setShowInfo(false)}>Zatvori informacije</button></div>
-                        <p id="document-keyboard">Dodirni krstić, zatim mesto na fotografiji. Ponovni dodir pomera isti izabrani ugao. Možeš i prevlačiti krstić. Strelice pomeraju izabrani ugao; Shift ubrzava pomeranje.</p>
+                        <p id="document-keyboard">Ugao možeš izabrati u gornjoj traci ili dodirom centra krstića. Izbor u traci postavlja tačku sledećim dodirom fotografije, i blizu drugog ugla. Ponovni dodir fotografije pomera isti izabrani ugao. Krstić možeš i prevlačiti. Strelice pomeraju izabrani ugao; Shift ubrzava pomeranje.</p>
                         <p>Original: {size(file.size)}{source&&' · '+source.width+' × '+source.height+' px'}. Rotacija izlaza: {turns*90}°.</p>
                         {source?.reduced&&<p>Radna slika je umanjena. Proveri sitan tekst; original je dostupan.</p>}
                         <p>Priprema koristi ograničenu radnu sliku, ali pregledač ne garantuje memorijski plafon.</p>
@@ -1540,7 +1603,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.29.1';
+        const RELEASE_VERSION = '2026.10.29.2';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
