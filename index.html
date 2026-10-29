@@ -650,7 +650,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const supportedValue=(key,value)=>{
                 if(value===undefined)return true;
                 if(['baseMonths','extendedMonths'].includes(key))return (typeof value==='number'||typeof value==='string'&&/^\d+$/.test(value))&&Number.isSafeInteger(Number(value))&&Number(value)>=(key==='baseMonths'?1:0);
-                if(key==='purchasePriceMinor')return Number.isSafeInteger(value)&&value>=0;
+                if(key==='purchasePriceMinor')return value===null||Number.isSafeInteger(value)&&value>=0;
                 return typeof value==='string';
             };
             const supported=plain(base)&&plain(current)&&plain(draft.metadata)&&draftFields.every(key=>[base[key],current[key],draft.metadata[key]].every(value=>supportedValue(key,value)));
@@ -1540,7 +1540,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.28.1';
+        const RELEASE_VERSION = '2026.10.29.1';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -1552,7 +1552,27 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return Number.isFinite(n) ? n : null;
             } catch { return null; }
         };
-        const formMetadata = (form, initial) => { const {purchasePrice,...rest}=form; return {...rest,name:form.name.trim(),store:form.store.trim(),baseMonths:Number(form.baseMonths),extendedMonths:Number(form.extendedMonths),category:form.category === '' ? initial?.category : form.category,purchasePriceMinor:purchasePrice===undefined?initial?.purchasePriceMinor:toMinor(purchasePrice),currency:textValue(form.currency).trim()||initial?.currency,invoiceNumber:textValue(form.invoiceNumber).trim()||initial?.invoiceNumber,fiscalReceiptUrl:textValue(form.fiscalReceiptUrl).trim()||initial?.fiscalReceiptUrl}; };
+        const formValues = (initial, metadata = {}) => {
+            const {purchasePrice,purchasePriceMinor,...rest}=metadata;
+            return {
+                name:textValue(initial?.name),category:textValue(initial?.category),
+                purchaseDate:initial?(parseDate(initial.purchaseDate)?initial.purchaseDate:''):'',
+                baseMonths:initial?(monthsValue(initial.baseMonths,1)??''):24,
+                extendedMonths:initial?(monthsValue(initial.extendedMonths??0,0)??''):0,
+                store:textValue(initial?.store),description:textValue(initial?.description),
+                currency:textValue(initial?.currency),invoiceNumber:textValue(initial?.invoiceNumber),fiscalReceiptUrl:textValue(initial?.fiscalReceiptUrl),
+                ...rest,
+                purchasePrice:purchasePrice!==undefined?(purchasePrice??''):priceText(purchasePriceMinor!==undefined?purchasePriceMinor:initial?.purchasePriceMinor)
+            };
+        };
+        const formMetadata = (form, initial) => {
+            const {purchasePrice,purchasePriceMinor,...rest}=form;
+            const optionalText=key=>form[key]===undefined?initial?.[key]:textValue(form[key]).trim();
+            return {...rest,name:form.name.trim(),store:form.store.trim(),baseMonths:Number(form.baseMonths),extendedMonths:Number(form.extendedMonths),
+                category:form.category===undefined?initial?.category:form.category,
+                purchasePriceMinor:purchasePrice===undefined?(purchasePriceMinor===undefined?initial?.purchasePriceMinor:purchasePriceMinor):(toMinor(purchasePrice)??null),
+                currency:optionalText('currency'),invoiceNumber:optionalText('invoiceNumber'),fiscalReceiptUrl:optionalText('fiscalReceiptUrl')};
+        };
         const catalogRows = (records, search, filters, sort) => {
             const q=normalizeSearch(search);
             const rows=records.filter(w=>w.id!=='gp-live-integration-test-001').map((w,index)=>({w,index,exp:calcExp(w.purchaseDate,w.baseMonths,w.extendedMonths)})).map(r=>({...r,days:calcDays(r.exp)}));
@@ -2091,15 +2111,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const disposed = useRef(false), discardingRef = useRef(false);
             const [discarding, setDiscarding] = useState(false);
             const [sealed, setSealed] = useState(!!restored.current?.sealed);
-            const [form, setForm] = useState(() => ({
-                name: textValue(initial?.name), category: textValue(initial?.category),
-                purchaseDate: initial ? (parseDate(initial.purchaseDate) ? initial.purchaseDate : '') : '',
-                baseMonths: initial ? (monthsValue(initial.baseMonths, 1) ?? '') : 24,
-                extendedMonths: initial ? (monthsValue(initial.extendedMonths ?? 0, 0) ?? '') : 0,
-                store: textValue(initial?.store), description: textValue(initial?.description),
-                purchasePrice: priceText(restored.current?.metadata?.purchasePriceMinor??initial?.purchasePriceMinor),currency:textValue(initial?.currency),invoiceNumber:textValue(initial?.invoiceNumber),fiscalReceiptUrl:textValue(initial?.fiscalReceiptUrl),
-                ...restored.current?.metadata
-            }));
+            const [form, setForm] = useState(() => formValues(initial,restored.current?.metadata));
             const [attachments, setAttachments] = useState(() => restored.current?.attachments || attachmentRefs(initial));
             const [pending, setPending] = useState(() => restored.current?.pending || []);
             const pendingUrls = useRef(new Set()), galleryUrls=useRef(new Set()), galleryRun=useRef(null);
@@ -2298,8 +2310,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     const current=service.getDraft(user.uid);
                     if(!current||current.operationId!==draft.operationId||service.contentRevision(current)!==service.contentRevision(draft))throw Object.assign(Error('Nacrt je ponovo promenjen. Učitajte ga ponovo; vaš prikaz nije prepisan.'),{code:'DRAFT_STALE'});
                     draftOperation.current=draft.operationId;acknowledgeDraft(draft);metadataBase.current=JSON.parse(draft.expected);
-                    const {purchasePriceMinor,...metadata}=draft.metadata;
-                    setForm({name:'',category:'',purchaseDate:'',baseMonths:24,extendedMonths:0,store:'',description:'',currency:'',invoiceNumber:'',fiscalReceiptUrl:'',...metadata,purchasePrice:priceText(purchasePriceMinor)});
+                    setForm(formValues(metadataBase.current,draft.metadata));
                     setAttachments(draft.attachments);setPending(rows);for(const url of created)pendingUrls.current.add(url);
                     staleRef.current=false;setStale(false);conflictRef.current=null;setConflict(null);setChoices({});setSafeConflict(false);setError('');applied=true;
                 }finally{if(!applied)for(const url of created)URL.revokeObjectURL(url);}
@@ -2339,7 +2350,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     setError('Unesite naziv, ispravan datum kupovine koji nije u budućnosti, celo trajanje u mesecima i opis do 150 karaktera.');
                     return;
                 }
-                try { const data=formMetadata(form,metadataBase.current); if(data.purchasePriceMinor!==undefined&&!/^[A-Z]{3}$/.test(data.currency||''))throw Error('Uz cenu izaberite valutu od tri velika slova, npr. EUR.'); if(data.currency&&!/^[A-Z]{3}$/.test(data.currency))throw Error('Valuta mora imati tri velika slova.'); if(data.invoiceNumber&&data.invoiceNumber.length>200)throw Error('Broj računa je predugačak.'); if(data.fiscalReceiptUrl)fiscalLink(data.fiscalReceiptUrl); } catch(e){setError(e.message);return;}
+                try { const data=formMetadata(form,metadataBase.current); if(data.purchasePriceMinor!=null&&!/^[A-Z]{3}$/.test(data.currency||''))throw Error('Uz cenu izaberite valutu od tri velika slova, npr. EUR.'); if(data.currency&&!/^[A-Z]{3}$/.test(data.currency))throw Error('Valuta mora imati tri velika slova.'); if(data.invoiceNumber&&data.invoiceNumber.length>200)throw Error('Broj računa je predugačak.'); if(data.fiscalReceiptUrl)fiscalLink(data.fiscalReceiptUrl); } catch(e){setError(e.message);return;}
                 if (malformedAttachments) { setError('Postojeći podaci o prilozima nisu podržani. Čuvanje je zaustavljeno da bi ostali očuvani.'); return; }
                 if (needsService && !service?.saveWarranty) { setError('Servis priloga nije konfigurisan. Nema čuvanja niti slanja priloga. Unos ostaje u formi.'); return; }
                 let readyPending;
