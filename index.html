@@ -1104,6 +1104,111 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             return <span ref={r} style={{ display: 'contents' }}></span>;
         };
 
+
+        // Navigation entries contain opaque keys only; records and draft data stay in memory.
+        const appNavigation = (() => {
+            let active=false,session='',current=null,path=[],entries=new Map(),layers=new Map(),guard=null,restoreView=null,notice=null,pending=false,ticket=0,authorized=null,timer=null,applying=false;
+            const listeners=new Set(),emit=()=>listeners.forEach(fn=>fn(pending));
+            const state=entry=>({...(history.state&&typeof history.state==='object'?history.state:{}),gpNavigation:{session,key:entry.key}});
+            const key=()=>crypto.randomUUID(),routeEqual=(a,b)=>a.view===b.view&&a.id===b.id&&a.operationId===b.operationId;
+            const clean=entry=>({...entry,layers:entry.layers.filter(id=>layers.has(id))});
+            const write=(entry,replace=false)=>{entries.set(entry.key,entry);if(replace){entries.delete(current?.key);path[path.indexOf(current?.key)]=entry.key;history.replaceState(state(entry),'');}else{const i=path.indexOf(current?.key);path=path.slice(0,i+1);path.push(entry.key);history.pushState(state(entry),'');}current=entry;};
+            const settle=()=>{clearTimeout(timer);timer=null;authorized=null;pending=false;emit();};
+            const restorePosition=(from,target)=>{const i=path.indexOf(target.key);path=path.slice(0,i+1);const copy={...from,key:key(),route:{...from.route},layers:[...from.layers]};entries.set(copy.key,copy);path.push(copy.key);history.pushState(state(copy),'');current=copy;};
+            const plan=(from,target)=>{
+                const closing=from.layers.filter(id=>!target.layers.includes(id)).reverse(),context={closingLayers:closing,leaving:!routeEqual(from.route,target.route)};
+                for(const id of closing){const layer=layers.get(id);if(layer&&layer.canClose(context)===false)return false;}
+                const decision=context.leaving&&guard?guard.allow(context):true;
+                const finish=ok=>ok===false?false:{closing,target};
+                return decision&&typeof decision.then==='function'?decision.then(finish,()=>false):finish(decision);
+            };
+            const apply=accepted=>{
+                const target=clean(accepted.target),from=current;current=target;entries.set(target.key,target);applying=true;
+                try{for(const id of accepted.closing)layers.get(id)?.close();if(!routeEqual(from.route,target.route))restoreView?.(target.route);}
+                finally{applying=false;settle();}
+            };
+            const pop=event=>{
+                if(!active||!current)return;
+                const marker=event.state?.gpNavigation,target=marker?.session===session?entries.get(marker.key):null;
+                if(!target||!path.includes(target.key)){settle();return;}
+                const from=clean(current),next=clean(target),fromIndex=path.indexOf(current.key),targetIndex=path.indexOf(target.key);
+                if(authorized?.key===target.key){apply(authorized.accepted);return;}
+                if(pending){restorePosition(from,next);if(authorized&&!path.includes(authorized.key)){ticket++;settle();}return;}
+                if(target.key===current.key)return;
+                if(routeEqual(from.route,next.route)&&JSON.stringify(from.layers)===JSON.stringify(next.layers)){
+                    current=next;const direction=Math.sign(targetIndex-fromIndex),index=targetIndex+direction;
+                    if(index>=0&&index<path.length)history.go(direction);return;
+                }
+                let accepted;try{accepted=plan(from,next);}catch{accepted=false;}
+                if(accepted&&typeof accepted.then==='function'){
+                    restorePosition(from,next);pending=true;emit();const own=++ticket,epoch=session;
+                    accepted.then(value=>{
+                        if(!active||epoch!==session||own!==ticket)return;
+                        if(!value||!path.includes(next.key)){settle();return;}
+                        authorized={key:next.key,accepted:value};const delta=path.indexOf(next.key)-path.indexOf(current.key);
+                        if(!delta){apply(value);return;}
+                        history.go(delta);timer=setTimeout(()=>{if(own===ticket){ticket++;settle();notice?.('Povratak nije završen. Podaci nisu odbačeni; pokušajte ponovo.');}},2000);
+                    });return;
+                }
+                if(!accepted){restorePosition(from,next);return;}
+                apply(accepted);
+            };
+            const unload=event=>{if(active&&(pending||guard?.warn()||[...layers.values()].some(layer=>layer.warn()))){event.preventDefault();event.returnValue='';}};
+            const start=(onRestore,onNotice)=>{
+                if(active)stop();active=true;session=key();restoreView=onRestore;notice=onNotice;entries=new Map();layers=new Map();guard=null;
+                current={key:key(),route:{view:'list'},layers:[]};path=[current.key];entries.set(current.key,current);history.replaceState(state(current),'');
+                window.addEventListener('popstate',pop);window.addEventListener('beforeunload',unload);
+                return stop;
+            };
+            const stop=()=>{active=false;ticket++;settle();guard=null;layers.clear();window.removeEventListener('popstate',pop);window.removeEventListener('beforeunload',unload);restoreView=notice=null;};
+            const record=(route,replace=false)=>{if(!active)return;if(!replace&&routeEqual(current.route,route)&&!current.layers.length)return;write({key:key(),route:{...route},layers:[]},replace);};
+            const request=action=>{
+                if(!active){action();return;}if(pending)return;
+                let decision;try{decision=guard?guard.allow({closingLayers:[],leaving:true}):true;}catch{decision=false;}
+                if(decision&&typeof decision.then==='function'){pending=true;emit();const own=++ticket,epoch=session;decision.then(ok=>{if(!active||epoch!==session||own!==ticket)return;settle();if(ok!==false)action();},()=>{if(own===ticket)settle();});}
+                else if(decision!==false)action();
+            };
+            const layer=(id,options)=>{
+                if(!active)return()=>{};layers.set(id,options);write({key:key(),route:{...current.route},layers:[...current.layers,id]});
+                return()=>{layers.delete(id);if(active&&current?.layers.includes(id)){current={...current,layers:current.layers.filter(value=>value!==id)};entries.set(current.key,current);if(!applying)history.replaceState(state(current),'');}};
+            };
+            const backTo=(view,fallback)=>{
+                if(!active){fallback();return;}if(pending)return;
+                const index=path.indexOf(current.key);
+                for(let i=index-1;i>=0;i--){const target=entries.get(path[i]);if(target?.route.view===view&&!target.layers.length){history.go(i-index);return;}}
+                request(fallback);
+            };
+            const backLayer=(id,all)=>{
+                if(!active||pending||!current?.layers.includes(id))return false;
+                const selected=all?id:current.layers.at(-1),index=path.indexOf(current.key);
+                for(let i=index-1;i>=0;i--){const target=entries.get(path[i]);if(target&&!target.layers.includes(selected)){history.go(i-index);return true;}}
+                return false;
+            };
+            return {start,record,request,layer,backLayer,backTo,
+                get active(){return active;},get pending(){return pending;},
+                subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);},
+                guard:options=>{guard=options;return()=>{if(guard===options)guard=null;};},
+                bindDraft:operationId=>{if(active&&current&&['add','edit'].includes(current.route.view))current.route.operationId=operationId;},
+                replaceRoute:route=>{if(active&&current){current.route={...route};entries.set(current.key,current);history.replaceState(state(current),'');}}
+            };
+        })();
+        function useNavigationPending() {
+            const [pending,setPending]=useState(appNavigation.pending);
+            useEffect(()=>appNavigation.subscribe(setPending),[]);return pending;
+        }
+        function useBackLayer(active,canClose,close,warn=()=>false) {
+            const latest=useRef({canClose,close,warn}),id=useRef(null);latest.current={canClose,close,warn};
+            React.useLayoutEffect(()=>{
+                if(!active||!appNavigation.active)return;const token=crypto.randomUUID();id.current=token;
+                const remove=appNavigation.layer(token,{canClose:context=>latest.current.canClose(context),close:()=>latest.current.close(),warn:()=>latest.current.warn()});
+                return()=>{remove();if(id.current===token)id.current=null;};
+            },[active]);
+            return (all=false)=>{
+                if(appNavigation.active&&id.current){appNavigation.backLayer(id.current,all);return;}
+                if(latest.current.canClose({closingLayers:[],leaving:false})!==false)latest.current.close();
+            };
+        }
+
         const attachmentKinds = ['Račun', 'Garancija', 'Ostalo'];
         const attachmentNames = window.attachmentNames;
         const attachmentRefs = item => (Array.isArray(item?.attachments) ? item.attachments : []).filter(a => a && typeof a.id === 'string' && typeof a.name === 'string').map(a => ({ ...a, id: a.id, name: a.name, kind: attachmentKinds.includes(a.kind) ? a.kind : 'Ostalo', mime: textValue(a.mime) || 'image/jpeg', ...(typeof a.driveFileId === 'string' ? {driveFileId:a.driveFileId} : {}), ...(typeof a.sha256 === 'string' ? {sha256:a.sha256} : {}), ...(Number.isFinite(a.size) ? {size:a.size} : {}), ...(typeof a.storage === 'string' ? {storage:a.storage} : {}) }));
@@ -1436,16 +1541,19 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 finally{acceptingRef.current=false;busyRef.current=false;if(alive.current)setBusy(false);}
             };
             const cancel=()=>{if(acceptingRef.current)return;controller.current?.abort();onCancel();};
+            const leavePhoto=useBackLayer(true,()=>!acceptingRef.current&&window.confirm('Fotografija još nije dodata nacrtu. Napustiti obradu?'),cancel,()=>true);
+            const leavePreview=useBackLayer(showPreview,()=>!acceptingRef.current,()=>{controller.current?.abort();setShowPreview(false);setZoom(false);setStatus('');});
+            const leaveInfo=useBackLayer(showInfo,()=>true,()=>setShowInfo(false));
             const size=value=>value<1048576?(value/1024).toFixed(0)+' KB':(value/1048576).toFixed(1)+' MB';
-            return <dialog ref={dialog} className="document-editor" aria-labelledby="document-title" onCancel={e=>{e.preventDefault();if(showInfo)setShowInfo(false);else cancel();}}>
+            return <dialog ref={dialog} className="document-editor" aria-labelledby="document-title" onCancel={e=>{e.preventDefault();if(showInfo)leaveInfo();else if(showPreview)leavePreview();else leavePhoto();}}>
                 <header className="document-toolbar">
-                    {showPreview&&<button ref={previewBackRef} type="button" aria-label="Nazad na sečenje" disabled={busy} onClick={()=>{setShowPreview(false);setZoom(false);setStatus('');}}>←</button>}
+                    {showPreview&&<button ref={previewBackRef} type="button" aria-label="Nazad na sečenje" disabled={busy&&acceptingRef.current} onClick={()=>leavePreview()}>←</button>}
                     <h2 id="document-title">{showPreview?'Pregled':'Iseci'}</h2>
                     {!showPreview&&<div className="document-corner-choices" role="group" aria-label="Izbor ugla">
                         {cornerNames.map((name,i)=><button key={name} type="button" className="document-corner-choice" aria-label={'Izaberi '+name.toLowerCase()} aria-describedby="document-keyboard" aria-pressed={selectedCorner===i} title={name} disabled={busy||loading||showInfo} onPointerDown={e=>choiceDown(e,i)} onPointerMove={choiceMove} onPointerUp={choiceEnd} onPointerCancel={choiceEnd} onLostPointerCapture={e=>{if(choiceGesture.current?.id===e.pointerId)choiceGesture.current=null;}} onClick={e=>{if(e.detail===0&&!e.nativeEvent.pointerType)chooseCorner(i,true);}}><svg viewBox="0 0 20 20" aria-hidden="true" style={{transform:'rotate('+i*90+'deg)'}}><path d="M5 15V5h10M5 5l10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg></button>)}
                     </div>}
                     {showPreview&&<><button type="button" aria-label="Rotiraj 90°" title={'Rotacija izlaza: '+turns*90+'°'} disabled={busy} onClick={rotate}>↻ 90°</button><button type="button" disabled={busy} onClick={()=>setZoom(v=>!v)}>{zoom?'Uklopi':'Uvećaj'}</button></>}
-                    <button ref={infoButtonRef} type="button" aria-label="Uputstva i detalji" aria-expanded={showInfo} aria-controls="document-info" onClick={()=>setShowInfo(v=>!v)}>ⓘ</button>
+                    <button ref={infoButtonRef} type="button" aria-label="Uputstva i detalji" aria-expanded={showInfo} aria-controls="document-info" onClick={()=>{if(showInfo)leaveInfo();else setShowInfo(true);}}>ⓘ</button>
                 </header>
                 {status&&<p className="document-status" role="status" aria-live="polite">{status}</p>}
                 <div className="document-stage" ref={stageRef} aria-busy={busy||loading}>
@@ -1456,7 +1564,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     </div>}
                     {showPreview&&result&&<div className={'document-result'+(zoom?' document-zoom':'')} tabIndex="0" inert={showInfo?'':undefined} aria-label="Pregled obrađenog dokumenta"><img src={result.url} alt="Obrađeni dokument — proveri čitljivost teksta" style={zoom?{width:result.width}:undefined}/></div>}
                     <section id="document-info" className="document-info" aria-label="Uputstva i detalji" hidden={!showInfo}>
-                        <div className="document-actions"><button ref={infoCloseRef} type="button" onClick={()=>setShowInfo(false)}>Zatvori informacije</button></div>
+                        <div className="document-actions"><button ref={infoCloseRef} type="button" onClick={()=>leaveInfo()}>Zatvori informacije</button></div>
                         <p id="document-keyboard">Ugao možeš izabrati u gornjoj traci ili dodirom centra krstića. Izbor u traci postavlja tačku sledećim dodirom fotografije, i blizu drugog ugla. Ponovni dodir fotografije pomera isti izabrani ugao. Krstić možeš i prevlačiti. Strelice pomeraju izabrani ugao; Shift ubrzava pomeranje.</p>
                         <p>Original: {size(file.size)}{source&&' · '+source.width+' × '+source.height+' px'}. Rotacija izlaza: {turns*90}°.</p>
                         {source?.reduced&&<p>Radna slika je umanjena. Proveri sitan tekst; original je dostupan.</p>}
@@ -1470,7 +1578,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <div className="document-actions">
                     {showPreview&&<button type="button" disabled={!result||busy} className="primary" onClick={()=>accept(result.file)}>Koristi obrađenu</button>}
                     {(showPreview||error)&&<button type="button" disabled={busy||loading} onClick={()=>accept(file)}>Zadrži original</button>}
-                    <button type="button" disabled={busy&&status.startsWith('Čuvam')} onClick={cancel}>{busy?'Prekini obradu':'Otkaži'}</button>
+                    <button type="button" disabled={busy&&status.startsWith('Čuvam')} onClick={()=>leavePhoto(true)}>{busy?'Prekini obradu':'Otkaži'}</button>
                     {!showPreview&&<button type="button" disabled={!source||busy||loading} ref={previewButtonRef} onClick={()=>preview()}>Pregledaj</button>}
                 </div>
             </dialog>;
@@ -1533,6 +1641,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 })();
                 return () => { active = false;controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
             }, [attachment, user.uid, attempt]);
+            const leaveViewer=useBackLayer(true,()=>true,onClose);
+            const leavePrint=useBackLayer(printPreview,()=>true,()=>{setPrintPreview(false);setZoom(false);});
             const printReady = !!src && printSize?.src === src && !error;
             const printAttachment = () => {
                 const image = printImage.current;
@@ -1545,10 +1655,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 link.download = attachment.name.replace(/[^\p{L}\p{N}._ -]/gu, '_') || 'prilog';
                 document.body.appendChild(link); link.click(); link.remove();
             };
-            return <><dialog ref={dialog} onCancel={e => { e.preventDefault(); onClose(); }} aria-label="Pregled priloga" className="attachment-dialog gp-viewer">
+            return <><dialog ref={dialog} onCancel={e => { e.preventDefault();if(printPreview)leavePrint();else leaveViewer(); }} aria-label="Pregled priloga" className="attachment-dialog gp-viewer">
                 <div className="no-print flex flex-wrap gap-2 justify-between items-center mb-4">
                     <h3 className="font-bold break-all">{attachment.kind}: {attachment.name}</h3>
-                    <button type="button" onClick={onClose} className="border rounded-xl px-3 py-2">{printPreview ? 'Nazad na garanciju' : 'Zatvori pregled'}</button>
+                    <button type="button" onClick={()=>leaveViewer(true)} className="border rounded-xl px-3 py-2">{printPreview ? 'Nazad na garanciju' : 'Zatvori pregled'}</button>
                 </div>
                 {error && <p role="alert" className="no-print text-red-700">{error} <button type="button" onClick={() => setAttempt(n => n + 1)} className="underline">Pokušaj ponovo</button></p>}
                 {!src && !error && <p role="status" className="no-print">Učitavanje priloga...</p>}
@@ -1556,7 +1666,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     <div className="no-print flex flex-wrap gap-2 mb-4">
                         <button type="button" className="border rounded-xl px-3 py-2" onClick={() => setZoom(v => !v)}>{zoom ? 'Uklopi sliku' : 'Uvećaj'}</button>
                         <button type="button" className="border rounded-xl px-3 py-2" onClick={download}>Preuzmi</button>
-                        <button type="button" className="border rounded-xl px-3 py-2" onClick={() => { setPrintPreview(v => !v); setZoom(false); }}>{printPreview ? 'Nazad na pregled' : 'Prikaz za štampu'}</button>
+                        <button type="button" className="border rounded-xl px-3 py-2" onClick={() => {if(printPreview)leavePrint();else{setPrintPreview(true);setZoom(false);}}}>{printPreview ? 'Nazad na pregled' : 'Prikaz za štampu'}</button>
                     </div>
                     {printPreview && <div className="no-print mb-4 space-y-2">
                         <p>Izaberi štampač ili sačuvaj ovaj prilog kao PDF.</p>
@@ -1605,7 +1715,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.29.3';
+        const RELEASE_VERSION = '2026.10.29.4';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -1984,6 +2094,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const [draftStatus,setDraftStatus]=useState({uid:null,state:'checking'});
             const [newEntry,setNewEntry]=useState(false);
             const [resumeEntry,setResumeEntry]=useState(null);
+            const navigationPending=useNavigationPending(),navigationRestore=useRef(()=>{});
+            useEffect(()=>{if(!user)return;return appNavigation.start(route=>navigationRestore.current(route),setNotice);},[user?.uid]);
             const refreshDraftStatus=useRef(()=>{});
             const inspectHomeDraft=uid=>{
                 if(!uid||window.firebaseDeps?.auth?.currentUser?.uid!==uid)throw Error('Nalog se promenio.');
@@ -2029,8 +2141,23 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     document.removeEventListener('pointerdown', markHeadingInput, true);
                 };
             }, []);
-            const finishNavigation = next => { if(view==='add'||view==='edit')setDraftStatus({uid:user?.uid,state:'checking'});setView(next); setAttachmentSection(false); };
-            const navigate = next => { if (!formBusy) finishNavigation(next); };
+            const finishNavigation = (next,replace=false,record=selected) => { if(view==='add'||view==='edit')setDraftStatus({uid:user?.uid,state:'checking'});appNavigation.record({view:next,...(next==='detail'&&record?{id:record.id}:{})},replace);setView(next);setAttachmentSection(false); };
+            const navigate = (next,record=selected) => { if(!formBusy||view==='add'||view==='edit')appNavigation.request(()=>finishNavigation(next,false,record)); };
+            const returnTo=next=>appNavigation.backTo(next,()=>finishNavigation(next));
+            navigationRestore.current=route=>{
+                if(!user||window.firebaseDeps?.auth?.currentUser?.uid!==user.uid)return;
+                const unavailable=()=>{appNavigation.replaceRoute({view:'list'});setView('list');setAttachmentSection(false);setNotice('Taj prikaz više nije dostupan. Sačuvani podaci nisu menjani.');};
+                if(['add','edit'].includes(route.view)){
+                    let draft;try{draft=window.attachmentService.getDraft(user.uid);window.attachmentService.contentRevision(draft);}catch{unavailable();return;}
+                    if(!draft||!route.operationId||draft.operationId!==route.operationId||draft.edit!==(route.view==='edit')||(draft.edit&&draft.id!==route.id)){unavailable();return;}
+                    const record=draft.edit?warranties.find(w=>w.id===draft.id):null;
+                    if(draft.edit&&(!record||record._attachmentDeletion)){unavailable();return;}
+                    if(openForm(record,false,'resume',false)===false)unavailable();return;
+                }
+                if(route.view==='detail'){const record=warranties.find(w=>w.id===route.id);if(!record){unavailable();return;}setSelected(record);}
+                if(!['list','detail','settings'].includes(route.view)){unavailable();return;}
+                if(view==='add'||view==='edit')setDraftStatus({uid:user.uid,state:'checking'});setView(route.view);setAttachmentSection(false);
+            };
             useEffect(() => {
                 const frame=requestAnimationFrame(()=>{
                     const target=attachmentSection?mainRef.current?.querySelector('#attachment-section'):[...(mainRef.current?.querySelectorAll('[data-page-heading]')||[])].find(el=>el.getClientRects().length);
@@ -2079,8 +2206,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return () => { active = false; if (unsubscribe) unsubscribe(); };
             }, [user, retry]);
 
-            const openForm = (record=null,focusAttachments=false,intent=null) => {
-                if(formBusy)return;
+            const openForm = (record=null,focusAttachments=false,intent=null,track=true) => {
+                if(formBusy)return false;
                 try {
                     const live=intent?inspectHomeDraft(user.uid):null,d=live?live.draft:window.attachmentService.getDraft(user.uid);
                     if(live)setDraftStatus(live.status);
@@ -2090,9 +2217,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if (record && !draftMatchesRecord(d, record)) throw new Error(draftConflictMessage);
                     setAuthError(''); setAttachmentSection(focusAttachments); setNewEntry(intent==='new');
                     setResumeEntry(intent==='resume'?{operationId:d.operationId,id:d.id,edit:d.edit}:null);
-                    if(d) { setSelected(d.edit ? (warranties.find(w=>w.id===d.id)||{id:d.id}) : null); setView(d.edit?'edit':'add'); }
-                    else {setSelected(record);setView(record?'edit':'add');}
-                } catch(e) {if(intent)refreshDraftStatus.current();setAuthError(e.message);}
+                    if(d) { setSelected(d.edit ? (warranties.find(w=>w.id===d.id)||{id:d.id}) : null);if(track)appNavigation.record({view:d.edit?'edit':'add',...(d.edit?{id:d.id}:{}),operationId:d.operationId});setView(d.edit?'edit':'add'); }
+                    else {setSelected(record);if(track)appNavigation.record({view:record?'edit':'add',...(record?{id:record.id}:{})});setView(record?'edit':'add');}
+                    return true;
+                } catch(e) {if(intent)refreshDraftStatus.current();setAuthError(e.message);return false;}
             };
             const login = async () => {
                 try { setAuthError(''); await window.firebaseDeps.signInWithPopup(window.firebaseDeps.auth, window.firebaseDeps.provider); }
@@ -2120,22 +2248,22 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             );
 
             return <div className={'gp-app'+(view==='list'?' home-active':'')}>
-                <a href="#app-main" className="skip-link">Pređi na sadržaj</a>
+                <a href="#app-main" className="skip-link" onClick={e=>{e.preventDefault();mainRef.current?.focus();mainRef.current?.scrollIntoView({block:'start'});}}>Pređi na sadržaj</a>
                 <header className="app-header"><div className="gp-container header-inner">
                     <button type="button" className="brand quiet" disabled={formBusy} onClick={()=>navigate('list')}><span className="brand-mark"><Icon name="shield-check"/></span><span>GarancijePro</span></button>
                     <div className="header-right"><TabPresence/><button type="button" className="settings-button" aria-label="Podešavanja" disabled={formBusy} onClick={()=>navigate('settings')}><svg viewBox="0 0 24 24" aria-hidden="true"/><span className="settings-icon" aria-hidden="true"><Icon name="settings"/></span></button></div>
                 </div></header>
                 <main className="gp-container" id="app-main" ref={mainRef} tabIndex={-1}>
-                    {notice&&<p role="status" className="toast">{notice}</p>}{authError&&<p role="alert" className="error">{authError}</p>}
+                    {navigationPending&&<p role="status" className="notice">Čekam potvrdu lokalnog nacrta pre povratka…</p>}{notice&&<p role="status" className="toast">{notice}</p>}{authError&&<p role="alert" className="error">{authError}</p>}
                     {view!=='list'&&view!=='settings'&&<div className="context-drive"><DriveConnection compact/></div>}
                     <div className="home-screen" hidden={view!=='list'}>
                         <section className="hero"><h1 data-page-heading tabIndex={-1}>Računi i garancije</h1><div className="home-actions"><button type="button" className="primary icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</div></section>
                         {currentDraftStatus==='error'&&draftStatusWarning}
-                        {view==='list'&&<><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail');}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije su uklonjene.')}/></>}
-                        <Catalog key={user.uid} records={warranties} user={user} listState={listState} onRetry={()=>setRetry(r=>r+1)} onOpen={w=>{setSelected(w);navigate('detail');}}/>
+                        {view==='list'&&<><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail',w);}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije su uklonjene.')}/></>}
+                        <Catalog key={user.uid} records={warranties} user={user} listState={listState} onRetry={()=>setRetry(r=>r+1)} onOpen={w=>{setSelected(w);navigate('detail',w);}}/>
                     </div>
-                    {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} requireEmptyDraft={newEntry} expectedResume={resumeEntry} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>finishNavigation(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list')} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list');setNotice('Nacrt je odbačen.');}} user={user}/></div>}
-                    {view==='detail'&&selected&&<Detail onEdit={()=>openForm(selected)} onAddAttachment={()=>openForm(selected,true)} onBusy={setFormBusy} onDeleted={message=>{setNotice(message);finishNavigation('list');}} item={warranties.find(w=>w.id===selected.id)||selected} onBack={()=>finishNavigation('list')} user={user}/>}
+                    {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} requireEmptyDraft={newEntry} expectedResume={resumeEntry} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>returnTo(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list',true)} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list',true);setNotice('Nacrt je odbačen.');}} user={user}/></div>}
+                    {view==='detail'&&selected&&<Detail onEdit={()=>openForm(selected)} onAddAttachment={()=>openForm(selected,true)} onBusy={setFormBusy} onDeleted={message=>{setNotice(message);finishNavigation('list',true);}} item={warranties.find(w=>w.id===selected.id)||selected} onBack={()=>returnTo('list')} user={user}/>}
                     {view==='settings'&&<section className="page-content settings-shell"><button type="button" className="quiet back-button" disabled={formBusy} onClick={()=>navigate('list')}><Icon name="arrow-left"/>Moja evidencija</button><h1 data-page-heading tabIndex={-1}>Podešavanja</h1><section className="panel"><h2>Nalog</h2><p className="small muted">Odjava ne briše lokalne fotografije nedovršenog nacrta. Brisanje podataka sajta može ih ukloniti.</p><p className="account-name">{textValue(user.email)||'Prijavljeni nalog'}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={logout}><Icon name="log-out"/> Odjavi se</button></section><section className="panel"><DriveConnection/></section><section className="panel"><h2>Verzija i nacrt</h2><p>Verzija {RELEASE_VERSION}</p>{currentDraftStatus==='error'&&draftStatusWarning}<button type="button" className="detail-actions" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="detail-actions" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</section></section>}
                     <nav className="bottom-nav" aria-label="Glavna navigacija">
                         <button type="button" aria-current={view==='list'?'page':undefined} disabled={formBusy} onClick={()=>navigate('list')}><Icon name="layout-grid"/><span>Proizvodi</span></button>
@@ -2196,10 +2324,12 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const [removing,setRemoving]=useState(false),removingRef=useRef(false),[removalNotice,setRemovalNotice]=useState('');
             const savingRef = useRef(false), processingRef = useRef(recoveringPhotos?1:0);
             const [staging,setStaging]=useState(false),stagingRef=useRef(false),stageSequence=useRef(0);
-            const mounted = useRef(true);
+            const mounted = useRef(true),stageTask=useRef(null),stageAcknowledged=useRef(null),exitContent=useRef(null),exitWait=useRef(null);
+            const navigationPending=useNavigationPending();
+            React.useLayoutEffect(()=>{appNavigation.bindDraft(draftOperation.current);},[]);
             useEffect(() => {
                 mounted.current = true;
-                return () => { mounted.current = false;galleryRun.current?.abort(); for (const url of pendingUrls.current) URL.revokeObjectURL(url); };
+                return () => { mounted.current = false;exitWait.current?.();galleryRun.current?.abort(); for (const url of pendingUrls.current) URL.revokeObjectURL(url); };
             }, []);
             useEffect(()=>()=>{galleryRun.current?.abort();},[user.uid,initial?.id]);
             useEffect(()=>{
@@ -2221,7 +2351,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             },[]);
             const cameraCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!removingRef.current&&!sealed&&!blocked()&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
             const handleCamera=e=>{
-                if(disposed.current||discardingRef.current||savingRef.current||removingRef.current||processingRef.current||stagingRef.current||sealed)return;
+                if(appNavigation.pending||disposed.current||discardingRef.current||savingRef.current||removingRef.current||processingRef.current||stagingRef.current||sealed)return;
                 const file=e.target.files?.[0];e.target.value='';if(!file)return;
                 if(!cameraCurrent()){setImageError('Aktivni nacrt nije dostupan. Fotografija nije dodata.');return;}
                 processingRef.current++;setProcessing(true);setImageError('');setDocumentFile(file);
@@ -2245,13 +2375,15 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
             useEffect(() => { onBusy(saving || discarding || processing || staging || removing || resolving || stale || !!conflict); return () => onBusy(false); }, [saving, discarding, processing, staging, removing, resolving, stale, conflict, onBusy]);
             useEffect(()=>{
-                if(sealed||savingRef.current||removingRef.current||disposed.current||discardingRef.current)return;
+                if(appNavigation.pending||sealed||savingRef.current||removingRef.current||disposed.current||discardingRef.current)return;
                 setPending(previous=>attachmentNames.prepare(previous,[...legacy,...attachments],form.name));
             },[form.name,attachments,pending,sealed]);
             const acknowledgeDraft=draft=>{
                 draftPending.current=service.pendingFingerprint(draft.pending);draftRevisionRef.current=service.contentRevision(draft);
                 if(mounted.current)setSealed(!!draft.sealed);
             };
+            const stagedContent=window.garancijeFingerprint({form,attachments,pending:service.pendingFingerprint(pending)});
+            exitContent.current=stagedContent;
             useEffect(()=>{
                 const ticket=++stageSequence.current;let cancelled=false;
                 if(!mounted.current||disposed.current||discardingRef.current||savingRef.current||removingRef.current||sealed||processingRef.current||blocked()){
@@ -2260,19 +2392,44 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 stagingRef.current=true;setStaging(true);
                 const current=()=>!cancelled&&ticket===stageSequence.current&&mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!removingRef.current&&!sealed&&!processingRef.current&&!blocked();
                 const {id,...base}=initial||{};
-                service.stageDraft({userId:user.uid,id:initial?.id||null,base:initial?base:null,metadata:form,attachments,pending,operationId:draftOperation.current,expectedPending:()=>draftPending.current,expectedRevision:()=>draftRevisionRef.current,isCurrent:current,onStaged:acknowledgeDraft})
-                    .catch(e=>{if(current()&&e.name!=='AbortError')handleDraftError(e);})
+                stageTask.current=service.stageDraft({userId:user.uid,id:initial?.id||null,base:initial?base:null,metadata:form,attachments,pending,operationId:draftOperation.current,expectedPending:()=>draftPending.current,expectedRevision:()=>draftRevisionRef.current,isCurrent:current,onStaged:acknowledgeDraft})
+                    .then(()=>{if(current())stageAcknowledged.current=stagedContent;return current();},e=>{if(current()&&e.name!=='AbortError')handleDraftError(e);return false;})
                     .finally(()=>{if(ticket===stageSequence.current){stagingRef.current=false;if(mounted.current)setStaging(false);}});
                 return()=>{cancelled=true;};
             },[form,attachments,pending,sealed,stale,conflict,resolving,processing,removing]);
-            const change = (field, value) => { if(!sealed && !savingRef.current && !removingRef.current && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
+            const allowExit=()=>{
+                if(!mounted.current||window.firebaseDeps?.auth?.currentUser?.uid!==user.uid)return false;
+                if(savingRef.current||discardingRef.current||removingRef.current||resolutionRef.current||cameraAccepting.current||processingRef.current&&!documentFile){setError('Operacija još traje. Povratak nije otkazao čuvanje; sačekajte ishod.');return false;}
+                if(blocked())return window.confirm('Zatvoriti ovaj prikaz konflikta? Nepotvrđene izmene ove kartice biće napuštene; aktuelni nacrt i njegovi prilozi ostaju.');
+                if(sealed)return window.confirm('Ishod čuvanja još nije potvrđen. Nacrt ostaje zaključan za nastavak iste operacije. Napustiti prikaz?');
+                const content=exitContent.current;
+                if(stageAcknowledged.current===content&&!stagingRef.current)return true;
+                const finish=()=>{
+                    if(!mounted.current||window.firebaseDeps?.auth?.currentUser?.uid!==user.uid||content!==exitContent.current)return false;
+                    if(stageAcknowledged.current===content)return true;
+                    setError('Povratak je zaustavljen jer lokalni upis tada nije bio potvrđen. Prikaz nije automatski napušten.');
+                    return window.confirm('Poslednje izmene možda nisu u nacrtu. Napustiti prikaz bez potvrde lokalnog čuvanja? Postojeći nacrt i prilozi se ne brišu.');
+                };
+                if(processingRef.current){setError('Prvo zatvorite obradu fotografije, pa ponovite povratak.');return false;}
+                if(!stageTask.current)return finish();
+                return new Promise(resolve=>{
+                    let done=false;
+                    const complete=()=>{if(done)return;done=true;clearTimeout(timeout);if(exitWait.current===complete)exitWait.current=null;resolve();};
+                    const timeout=setTimeout(complete,30000);exitWait.current=complete;
+                    stageTask.current.then(complete,complete);
+                }).then(finish);
+            };
+            const exitGuardRef=useRef({allow:allowExit,warn:()=>false});
+            exitGuardRef.current={allow:allowExit,warn:()=>savingRef.current||discardingRef.current||removingRef.current||resolutionRef.current||processingRef.current>0||stagingRef.current||sealed||blocked()||stageAcknowledged.current!==exitContent.current};
+            React.useLayoutEffect(()=>appNavigation.guard({allow:context=>exitGuardRef.current.allow(context),warn:()=>exitGuardRef.current.warn()}),[]);
+            const change = (field, value) => { if(!appNavigation.pending&&!sealed && !savingRef.current && !removingRef.current && !disposed.current && !discardingRef.current) setForm(previous => ({ ...previous, [field]: value })); };
             const [qrNotice,setQrNotice]=useState('');
             const qrCurrent=()=>{try{const d=service.getDraft(user.uid);return mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!removingRef.current&&!sealed&&!blocked()&&d?.operationId===draftOperation.current&&draftMatchesRecord(d,initial);}catch{return false;}};
             const applyQR=proposal=>{if(!qrCurrent())return;const result=mergeReceipt(form,proposal);setForm(result.next);const names={name:'naziv',store:'prodavnica',purchaseDate:'datum',purchasePrice:'cena',currency:'valuta',invoiceNumber:'broj računa',fiscalReceiptUrl:'fiskalni link'};setQrNotice(result.kept.length?'Zadržana popunjena polja: '+result.kept.map(k=>names[k]).join(', ')+'.':'Podaci su preneti u formu. Pregledajte ih i dopunite kategoriju i trajanje. Garancija nije sačuvana.');};
             const expiry = calcExp(form.purchaseDate, form.baseMonths, form.extendedMonths);
 
             const handleFile = async e => {
-                if(disposed.current||discardingRef.current||savingRef.current||removingRef.current||processingRef.current||stagingRef.current||blocked())return;
+                if(appNavigation.pending||disposed.current||discardingRef.current||savingRef.current||removingRef.current||processingRef.current||stagingRef.current||blocked())return;
                 const files=Array.from(e.target.files||[]);e.target.value='';if(!files.length)return;
                 const controller=new AbortController(),operation=draftOperation.current,revision=draftRevisionRef.current;
                 const live=()=>mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!blocked()&&galleryRun.current===controller&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
@@ -2332,17 +2489,17 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 }
             };
             const changeKind = (id, kind) => {
-                if (sealed || savingRef.current || removingRef.current || disposed.current || discardingRef.current) return;
+                if (appNavigation.pending || sealed || savingRef.current || removingRef.current || disposed.current || discardingRef.current) return;
                 setAttachments(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
                 setPending(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
             };
             const changePendingName = (id, value) => {
-                if(sealed||savingRef.current||removingRef.current||disposed.current||discardingRef.current)return;
+                if(appNavigation.pending||sealed||savingRef.current||removingRef.current||disposed.current||discardingRef.current)return;
                 setPending(previous=>previous.map(a=>a.id===id?{...a,name:value+(a.extension||attachmentNames.extension(a.mime,a.name)),nameCustom:true,nameTruncated:false}:a));
             };
 
             const removePending=async id=>{
-                if(removingRef.current||savingRef.current||processingRef.current||stagingRef.current||documentFile||sealed||disposed.current||discardingRef.current||blocked())return;
+                if(appNavigation.pending||removingRef.current||savingRef.current||processingRef.current||stagingRef.current||documentFile||sealed||disposed.current||discardingRef.current||blocked())return;
                 const target=pending.find(a=>a.id===id);if(!target)return;
                 const text='Ukloniti „'+target.name+'“ iz ovog nacrta? Ostali podaci i prilozi ostaju. Fajlovi na Drive-u se ne brišu.'+(target.documentPhoto?' Biće uklonjena i lokalna kopija ove potvrđene fotografije. Ako je nemate sačuvanu drugde, moraćete ponovo da je fotografišete.':' Izvorna datoteka na uređaju ostaje nepromenjena.');
                 if(!window.confirm(text))return;
@@ -2408,7 +2565,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const conflictValue=(key,value)=>value===undefined||value===null||value===''?'Prazno':key==='purchasePriceMinor'?priceText(value):String(value);
             const submit = async e => {
                 e.preventDefault();
-                if (disposed.current || discardingRef.current) return;
+                if (appNavigation.pending || disposed.current || discardingRef.current) return;
                 if (draftConflict) { setError(draftConflictMessage); return; }
                 if (savingRef.current || removingRef.current || processingRef.current || blocked()) return;
                 if (!form.name.trim() || !expiry || form.purchaseDate > dateInput() || form.description.length > 150) {
@@ -2445,7 +2602,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
 
             const discard = async () => {
-                if (disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current || removingRef.current || sealed) return;
+                if (appNavigation.pending || disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current || removingRef.current || sealed) return;
                 discardingRef.current = true; setDiscarding(true);
                 try {
                     const d = service.getDraft(user.uid);
@@ -2476,13 +2633,13 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     {sealed && <p role="status">Nastavak započetog čuvanja: podaci su zaključani dok se ishod ne potvrdi. Nedostajuće originale izaberite ponovo.</p>}
                     {error && <p role="alert" className="text-red-700">{error}</p>}
                     {staging&&!saving&&<p role="status">Čuvam lokalni nacrt…</p>}
-                    {stale&&<section ref={recoveryPanel} tabIndex={-1} className="notice" aria-label="Zastarela kartica"><h2>Nacrt je promenjen u drugoj kartici</h2><p>Ove prikazane izmene nisu prepisale aktuelni nacrt. Nastavite u aktuelnoj kartici ili izričito učitajte njene podatke.</p><button type="button" disabled={resolving} onClick={reloadDraft}>Učitaj aktuelni nacrt</button><button type="button" disabled={resolving} onClick={()=>{if(window.confirm('Zatvori zastareli prikaz? Neupisane izmene ove kartice biće napuštene; aktuelni nacrt ostaje.'))onCancel();}}>Zatvori zastareli prikaz</button></section>}
+                    {stale&&<section ref={recoveryPanel} tabIndex={-1} className="notice" aria-label="Zastarela kartica"><h2>Nacrt je promenjen u drugoj kartici</h2><p>Ove prikazane izmene nisu prepisale aktuelni nacrt. Nastavite u aktuelnoj kartici ili izričito učitajte njene podatke.</p><button type="button" disabled={resolving} onClick={reloadDraft}>Učitaj aktuelni nacrt</button><button type="button" disabled={resolving} onClick={onCancel}>Zatvori zastareli prikaz</button></section>}
                     {safeConflict&&!conflict&&!stale&&<section className="notice"><p>Potvrđen je konflikt pre spoljnog upisa. Lokalni unos i novi prilozi su očuvani.</p><button type="button" disabled={resolving||saving} onClick={inspectConflict}>Pregledaj konflikt</button></section>}
                     {conflict&&!stale&&<section ref={recoveryPanel} tabIndex={-1} className="notice" aria-label="Razrešenje konflikta"><h2>Pregled razlika</h2><p>Ništa još nije prepisano. Novi lokalni prilozi ostaju uz nacrt. Razrešenje ne šalje podatke na Drive ili u evidenciju; nakon pregleda ponovo birate Sačuvaj.</p>{conflict.reason&&<p>{conflict.reason}</p>}
                         {conflict.canRebase&&conflict.fields.map(row=><div key={row.key}><strong>{row.label}</strong><p>Moj unos: {conflictValue(row.key,row.local)}</p><p>Noviji zapis: {conflictValue(row.key,row.current)}</p>{row.conflict?<label>Vrednost za {row.label}<select disabled={resolving} value={choices[row.key]||''} onChange={e=>setChoices(old=>({...old,[row.key]:e.target.value}))}><option value="">Izaberite vrednost</option><option value="local">Zadrži moj unos</option><option value="current">Preuzmi iz novijeg zapisa</option></select></label>:<p>Izmene ovog polja mogu bezbedno da se usklade.</p>}</div>)}
                         <div className="row">{conflict.canRebase&&<button type="button" disabled={resolving||conflict.fields.some(f=>f.conflict&&!choices[f.key])} onClick={()=>resolveConflict(false)}>Primeni razrešenje u nacrtu</button>}<button type="button" disabled={resolving} onClick={inspectConflict}>Osveži pregled konflikta</button><button type="button" disabled={resolving} onClick={()=>{conflictRef.current=null;setConflict(null);}}>Zadrži nacrt bez razrešenja</button><button type="button" disabled={resolving} onClick={()=>resolveConflict(true)}>Odbaci samo ovaj lokalni nacrt</button></div>
                     </section>}
-                    <fieldset disabled={saving || discarding || removing || resolving || stale || !!conflict} className="space-y-4">
+                    <fieldset disabled={navigationPending || saving || discarding || removing || resolving || stale || !!conflict} className="space-y-4">
                         {!initial&&<ReceiptQR disabled={saving||processing||discarding||sealed} isCurrent={qrCurrent} onApply={applyQR}/>}
                         {qrNotice&&<p role="status">{qrNotice}</p>}
                         <section className="form-block"><h2>Podaci o proizvodu</h2><div className="form-grid"><label className="block full">Naziv proizvoda
@@ -2531,7 +2688,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
                         {imageError && <p role="alert" className="text-red-700">{imageError}</p>}
                         </section><div className="form-actions">
-                            <button type="button" disabled={saving||processing||discarding||staging||removing} onClick={onCancel} className="flex-1 py-3 border border-slate-300 rounded-xl font-bold text-slate-500">Odustani</button>
+                            <button type="button" disabled={navigationPending||saving||processing||discarding||removing} onClick={onCancel} className="flex-1 py-3 border border-slate-300 rounded-xl font-bold text-slate-500">Odustani</button>
                             <button type="submit" disabled={saving || processing || removing} className="primary flex-1 py-3 font-bold disabled:opacity-50">{saving ? 'Čuvanje...' : error ? 'Pokušaj ponovo' : 'Sačuvaj'}</button>
                         </div>
                         <div className="border-t pt-4">
@@ -2558,7 +2715,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 }).catch(e=>{if(life.current.active&&seq===life.current.seq)setError(e.message);}).finally(()=>{if(life.current.active&&seq===life.current.seq)setLoading(false);});
                 return()=>{life.current.seq++;};
             },[item.id,user.uid,mode,driveState,retry]);
-            const close=()=>{if(!life.current.running)onClose();};
+            const close=useBackLayer(true,()=>!life.current.running,onClose,()=>life.current.running);
             const confirmDelete=async()=>{
                 if(life.current.running||loading||!plan)return;life.current.running=true;setRunning(true);setError('');
                 try{
@@ -2570,7 +2727,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
             const chosen=mode||plan?.mode||'app-only';
             return <dialog ref={dialog} className="warranty-delete" aria-labelledby="warranty-delete-title" onCancel={e=>{e.preventDefault();close();}}>
-                <div className="modal-header"><h2 id="warranty-delete-title">Obriši garanciju</h2><button type="button" aria-label="Zatvori pregled brisanja" disabled={running} onClick={close}>×</button></div>
+                <div className="modal-header"><h2 id="warranty-delete-title">Obriši garanciju</h2><button type="button" aria-label="Zatvori pregled brisanja" disabled={running} onClick={()=>close(true)}>×</button></div>
                 <div className="modal-body">
                     <p><strong>{plan?.name||textValue(item.name)||'Garancija'}</strong></p>
                     {plan?.resume&&<p className="notice">Operacija je već započeta. Potvrđeni fajlovi ostaju u korpi; nastavak proverava iste ID-eve. Promena na „samo zapis“ ne vraća ranije premeštene fajlove.</p>}
@@ -2587,7 +2744,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     {plan?.needsAcknowledgement&&<label><input type="checkbox" checked={ack} disabled={running} onChange={e=>setAck(e.target.checked)}/>Razumem da prethodni zahtev ima neizvestan ishod. Taj fajl neće dobiti novi zahtev; brisanje zapisa uklanja njegovu referencu, bez tvrdnje da je fajl obrisan ili sačuvan.</label>}
                     {error&&<p role="alert" className="error">{error}</p>}
                     <div className="modal-actions">
-                        <button type="button" disabled={running} onClick={close}>Otkaži</button>
+                        <button type="button" disabled={running} onClick={()=>close(true)}>Otkaži</button>
                         <button type="button" disabled={running||loading} onClick={()=>{setError('');setRetry(n=>n+1);}}>Osveži proveru</button>
                         <button type="button" className="danger" disabled={running||loading||!plan||plan.needsAcknowledgement&&!ack} onClick={confirmDelete}>{running?'Brisanje…':plan?.resume?'Potvrdi nastavak':chosen==='trash'?'Premesti proverene fajlove i obriši zapis':'Potvrdi brisanje samo zapisa'}</button>
                     </div>
