@@ -1715,7 +1715,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.29.4';
+        const RELEASE_VERSION = '2026.10.30.1';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2700,6 +2700,14 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         }
 
 
+        const deletionFileMessage = (file,mode) => {
+            if(!file.fileId)return ['receiptImage','warrantyImage'].includes(file.key)
+                ?'Stari prilog je sačuvan u podacima zapisa. Ne šalje mu se zaseban Drive zahtev. Brisanjem zapisa uklanja se njegov sadržaj ili veza iz aplikacije.'
+                :'Drive fajl ovog priloga nije potvrđen i ne šalje mu se zahtev. Brisanjem zapisa uklanja se ova referenca iz aplikacije.';
+            if(file.uncertain)return file.reason+' Brisanjem zapisa uklanja se njegova veza sa aplikacijom.';
+            if(file.state==='trashed')return 'Već je potvrđen u Drive korpi. Brisanje zapisa ili promena režima ne vraća fajl.';
+            return mode==='app-only'?'Ova operacija ne šalje novi zahtev ovom Drive fajlu. Ranije premešteni fajlovi ostaju u korpi.':file.reason;
+        };
         function WarrantyDelete({item,user,onClose,onDeleted}) {
             const service=window.attachmentService,dialog=useRef(null),life=useRef({active:true,seq:0,running:false});
             const [mode,setMode]=useState(null),[plan,setPlan]=useState(null),[loading,setLoading]=useState(true),[running,setRunning]=useState(false),[error,setError]=useState(''),[ack,setAck]=useState(false),[retry,setRetry]=useState(0),[,refresh]=useState(0);
@@ -2721,8 +2729,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 try{
                     await service.executeDeletion({userId:user.uid,plan,acknowledgeUncertain:ack});
                     service.assertWriteAllowed(user.uid);
-                    if(life.current.active)onDeleted(plan.mode==='trash'?'Garancija je obrisana. Samo potvrđeni prilozi su premešteni u Drive korpu; izuzeti fajlovi ostaju.':'Zapis je obrisan. Nema novih premeštanja Drive fajlova.');
-                }catch(e){if(life.current.active){setError('Brisanje nije završeno. '+e.message);setRetry(n=>n+1);}}
+                    if(life.current.active)onDeleted('Zapis garancije je obrisan iz aplikacije. Aplikacija nema vraćanje zapisa. '+(plan.mode==='trash'?'Drive: obrada priloga je završena. Izuzetim fajlovima u ovom pokušaju nije slat novi zahtev; to ne potvrđuje ishod ranijih neizvesnih zahteva.':'Drive: nije slat novi zahtev za premeštanje fajlova. Ranije premešteni fajlovi ostaju u korpi.')+' Vraćanje Drive fajla ne vraća zapis garancije.');
+                }catch(e){if(life.current.active){setError('Završetak brisanja nije potvrđen. '+(plan.mode==='trash'||plan.operation.files.some(f=>f.state==='trashed'||f.uncertain)?'Neki Drive fajlovi možda su već u korpi. ':'')+'Proverite stanje i nastavite istu operaciju. '+e.message);setRetry(n=>n+1);}}
                 finally{life.current.running=false;if(life.current.active)setRunning(false);}
             };
             const chosen=mode||plan?.mode||'app-only';
@@ -2730,23 +2738,25 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <div className="modal-header"><h2 id="warranty-delete-title">Obriši garanciju</h2><button type="button" aria-label="Zatvori pregled brisanja" disabled={running} onClick={()=>close(true)}>×</button></div>
                 <div className="modal-body">
                     <p><strong>{plan?.name||textValue(item.name)||'Garancija'}</strong></p>
-                    {plan?.resume&&<p className="notice">Operacija je već započeta. Potvrđeni fajlovi ostaju u korpi; nastavak proverava iste ID-eve. Promena na „samo zapis“ ne vraća ranije premeštene fajlove.</p>}
+                    <p className="notice"><strong>Zapis garancije i njegovi podaci brišu se iz aplikacije. Aplikacija nema korpu ni vraćanje tog zapisa.</strong></p>
+                    {plan?.resume&&<p className="notice">Nastavljamo istu operaciju uz proveru istih fajlova. Već potvrđeni fajlovi ostaju u korpi; prelazak na „samo zapis“ ih ne vraća.</p>}
                     <fieldset disabled={running}>
                         <legend>Izaberi obim brisanja</legend>
                         <label><input type="radio" name="warranty-delete-mode" checked={chosen==='app-only'} onChange={()=>{setError('');setMode('app-only');}}/>Obriši samo zapis iz aplikacije — bez novih promena na Drive-u</label>
                         <label><input type="radio" name="warranty-delete-mode" checked={chosen==='trash'} onChange={()=>{setError('');setMode('trash');}}/>Obriši zapis i premesti proverene priloge u Drive korpu</label>
                     </fieldset>
+                    <p>{chosen==='trash'?'U Drive korpu idu samo fajlovi označeni na spisku za premeštanje. Izuzete fajlove ova operacija ne premešta.':'Drive fajlovima ne šaljemo novi zahtev za premeštanje. Već premešteni fajlovi ostaju u korpi.'}</p>
                     {(chosen==='trash'||plan?.resume)&&<DriveConnection compact/>}
                     {loading&&<p role="status">Proveravam zapis, reference i dostupnost priloga…</p>}
-                    {plan&&<ul className="deletion-files" aria-label="Tačan spisak priloga">{plan.operation.files.map(f=><li key={f.key}><strong>{f.name}</strong>{f.count>1&&<span> · {f.count} referenci, jedan fajl</span>}<p>{f.reason}</p></li>)}</ul>}
-                    {plan&&!plan.operation.files.length&&<p>Nema zasebnih priloga za ovu operaciju.</p>}
-                    <p className="notice">Drive trajno briše fajlove iz korpe posle 30 dana, ili ranije ako ručno isprazniš korpu. Do tada zauzimaju prostor. Vraćanje fajla iz Drive korpe ne vraća obrisanu garanciju u aplikaciju.</p>
-                    {plan?.needsAcknowledgement&&<label><input type="checkbox" checked={ack} disabled={running} onChange={e=>setAck(e.target.checked)}/>Razumem da prethodni zahtev ima neizvestan ishod. Taj fajl neće dobiti novi zahtev; brisanje zapisa uklanja njegovu referencu, bez tvrdnje da je fajl obrisan ili sačuvan.</label>}
+                    {plan&&<ul className="deletion-files" aria-label="Tačan spisak priloga">{plan.operation.files.map(f=><li key={f.key}><strong>{f.name}</strong>{f.count>1&&<span> · {f.count} referenci, jedan fajl</span>}<p>{deletionFileMessage(f,chosen)}</p></li>)}</ul>}
+                    {plan&&!plan.operation.files.length&&<p>Nema priloga na spisku ove operacije.</p>}
+                    {(chosen==='trash'||plan?.operation.files.some(f=>f.state==='trashed'||f.uncertain))&&<p className="notice">Drive trajno briše fajlove iz korpe posle 30 dana, ili ranije ako ih ručno trajno obrišeš ili isprazniš korpu. Do tada zauzimaju prostor. Vraćanje fajla iz Drive korpe ne vraća obrisanu garanciju u aplikaciju.</p>}
+                    {plan?.needsAcknowledgement&&<label><input type="checkbox" checked={ack} disabled={running} onChange={e=>setAck(e.target.checked)}/>Razumem da stanje fajla posle prethodnog zahteva nije potvrđeno. Novi zahtev mu se neće slati. Brisanjem zapisa uklanja se njegova veza sa aplikacijom, iako nije potvrđeno gde je fajl.</label>}
                     {error&&<p role="alert" className="error">{error}</p>}
                     <div className="modal-actions">
                         <button type="button" disabled={running} onClick={()=>close(true)}>Otkaži</button>
                         <button type="button" disabled={running||loading} onClick={()=>{setError('');setRetry(n=>n+1);}}>Osveži proveru</button>
-                        <button type="button" className="danger" disabled={running||loading||!plan||plan.needsAcknowledgement&&!ack} onClick={confirmDelete}>{running?'Brisanje…':plan?.resume?'Potvrdi nastavak':chosen==='trash'?'Premesti proverene fajlove i obriši zapis':'Potvrdi brisanje samo zapisa'}</button>
+                        <button type="button" className="danger" disabled={running||loading||!plan||plan.needsAcknowledgement&&!ack} onClick={confirmDelete}>{running?'Brisanje…':plan?.resume?(chosen==='trash'?'Nastavi premeštanje i brisanje zapisa':'Nastavi brisanje samo zapisa'):chosen==='trash'?'Premesti proverene fajlove i obriši zapis':'Potvrdi brisanje samo zapisa'}</button>
                     </div>
                 </div>
             </dialog>;
@@ -2757,7 +2767,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             let hints=[];try{hints=service.getDeletionHints(user.uid);}catch{}
             const pending=records.filter(r=>r._attachmentDeletion),known=new Set(pending.map(r=>r.id));
             for(const hint of hints)if(!known.has(hint.id)){pending.push({id:hint.id,name:'Provera nedovršenog brisanja'});known.add(hint.id);}
-            return pending.length?<section className="notice" aria-label="Nedovršena brisanja"><p>Brisanje nije potvrđeno kao završeno. Reference su sačuvane do razrešenja; nema automatskog ponavljanja.</p>{pending.map(r=><button type="button" key={r.id} onClick={()=>onOpen(r)}>Nastavi / proveri: {textValue(r.name)||'Garancija'}</button>)}</section>:null;
+            return pending.length?<section className="notice" aria-label="Nedovršena brisanja"><p>Završetak brisanja nije potvrđen. Proverite stanje i nastavite istu operaciju; novi zahtevi se ne šalju automatski. Neki fajlovi možda su već u Drive korpi. Vraćanje fajla ne vraća zapis garancije.</p>{pending.map(r=><button type="button" key={r.id} onClick={()=>onOpen(r)}>Nastavi / proveri: {textValue(r.name)||'Garancija'}</button>)}</section>:null;
         }
 
         function Detail({ item, onBack, onEdit, onAddAttachment, onBusy, user, onDeleted }) {
