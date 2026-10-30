@@ -182,6 +182,7 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         body.gp-ui .home-screen .catalog-search-row{display:flex;align-items:stretch;flex-wrap:wrap;gap:8px}
         body.gp-ui .home-screen .search-box{flex:1 1 11rem}
         body.gp-ui .home-screen .search-box input{padding:.65rem 3rem .65rem 2.75rem;min-height:46px}
+        #catalog-search::-webkit-search-cancel-button{-webkit-appearance:none;display:none}
         body.gp-ui .home-screen .search-box button{width:2.75rem;height:2.75rem;min-width:44px;min-height:44px;top:50%;right:2px;transform:translateY(-50%)}
         body.gp-ui .home-screen .catalog-search-row>.icon-button{font-size:.875rem;min-height:46px;padding:.5rem .65rem}
         body.gp-ui .home-screen .toolbar{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
@@ -1776,7 +1777,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.30.2';
+        const RELEASE_VERSION = '2026.10.30.3';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2015,6 +2016,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         }
         function Catalog({records,user,listState,onRetry,onOpen}) {
             const [search,setSearch]=useState('');
+            const searchRef=useRef(null);
             const [filters,setFilters]=useState(blankFilters);
             const [sort,setSort]=useState('newest');
             const [showFilters,setShowFilters]=useState(false);
@@ -2030,7 +2032,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             return <section className="catalog" aria-labelledby="catalog-title">
                 <h2 id="catalog-title" className="catalog-title">Moja evidencija</h2>
                 <label className="search-label" htmlFor="catalog-search">Pretraži proizvode, prodavnice i opise</label>
-                <div className="catalog-search-row"><div className="search-box"><Icon name="search"/><input id="catalog-search" type="search" value={search} placeholder="Šta tražite?" onChange={e=>setSearch(e.target.value)}/><button type="button" aria-label="Obriši pretragu" disabled={!search} onClick={()=>setSearch('')}><Icon name="x"/></button></div><button type="button" aria-expanded={showFilters} aria-controls="catalog-filters" onClick={()=>setShowFilters(v=>!v)} className="icon-button"><Icon name="sliders-horizontal"/>Filteri{active.length?' ('+active.length+')':''}</button></div>
+                <div className="catalog-search-row"><div className="search-box"><Icon name="search"/><input ref={searchRef} id="catalog-search" type="search" value={search} placeholder="Šta tražite?" onChange={e=>setSearch(e.target.value)}/><button type="button" aria-label="Obriši pretragu" disabled={!search} onClick={()=>{setSearch('');searchRef.current?.focus();}}><Icon name="x"/></button></div><button type="button" aria-expanded={showFilters} aria-controls="catalog-filters" onClick={()=>setShowFilters(v=>!v)} className="icon-button"><Icon name="sliders-horizontal"/>Filteri{active.length?' ('+active.length+')':''}</button></div>
                 <div className="toolbar">
                     <label>Sortiraj<select value={sort} onChange={e=>setSort(e.target.value)}><option value="newest">Najnovije dodato</option><option value="oldest">Najstarije dodato</option><option value="name-asc">Naziv A–Z</option><option value="name-desc">Naziv Z–A</option><option value="expiry">Garancija najpre ističe</option><option value="purchase-new">Datum kupovine: novije prvo</option><option value="purchase-old">Datum kupovine: starije prvo</option></select></label>
                     <label>Prikaz<select value={mode} onChange={e=>changeMode(e.target.value)}><option value="cards">Kartice</option><option value="list">Lista</option><option value="detailed">Detaljno</option></select></label>
