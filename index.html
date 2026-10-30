@@ -4,12 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Registar Garancija Pro</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="./vendor/html5-qrcode.min.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         ::-webkit-scrollbar { width: 6px; }
@@ -205,12 +199,77 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
             body.gp-ui .home-screen .toolbar{grid-template-columns:repeat(auto-fit,minmax(min(100%,9rem),1fr))}
         }
 
+        /* Startup must remain readable before any external library arrives. */
+        #gp-boot{width:min(34rem,calc(100% - 2rem));margin:clamp(1rem,8vh,4rem) auto;padding:1.25rem;border:1px solid #d9e5f2;border-radius:16px;background:#fff;color:#142d52;display:grid;gap:1rem}
+        #gp-boot h1{font-size:1.65rem}
+        #gp-boot p{line-height:1.5}
+        #gp-boot button{min-width:44px;min-height:44px;justify-self:start}
+        #gp-boot [hidden],#gp-boot[hidden],#root[hidden]{display:none!important}
     </style>
 </head>
 <body class="gp-ui">
-    <div id="root"></div>
-
-    <script type="module">
+    <section id="gp-boot" aria-labelledby="gp-boot-title">
+        <h1 id="gp-boot-title">GarancijePro</h1>
+        <p id="gp-boot-status" role="status" aria-live="polite">Pokrećem GarancijePro…</p>
+        <p id="gp-boot-error" role="alert" hidden></p>
+        <button id="gp-boot-retry" type="button" hidden disabled>Pokušaj ponovo</button>
+        <p id="gp-boot-retry-help" hidden>Ponovni pokušaj učitava stranicu ponovo. Ne briše sačuvane podatke sajta.</p>
+        <noscript><style>#gp-boot-status{display:none}</style><p>Za pokretanje aplikacije potreban je JavaScript. Uključite ga u pregledaču i ponovo učitajte stranicu.</p></noscript>
+    </section>
+    <div id="root" hidden></div>
+    <script>
+    (() => {
+        const shell=document.getElementById('gp-boot'),root=document.getElementById('root'),status=document.getElementById('gp-boot-status'),error=document.getElementById('gp-boot-error'),retry=document.getElementById('gp-boot-retry'),help=document.getElementById('gp-boot-retry-help');
+        const labels={styles:'stilovi',lucide:'ikonice',react:'React',reactdom:'ReactDOM',babel:'obrada aplikacije',firebase:'povezivanje aplikacije'};
+        const required=['styles','lucide','react','reactdom','babel','firebase'],loaded=new Set();
+        let factory=null,started=false,ready=false,reloading=false,fatal=false,deadline;
+        const expiresAt=Date.now()+20000;
+        const pause=()=>clearTimeout(deadline);
+        const resume=()=>{if(ready||reloading||fatal||!error.hidden)return;clearTimeout(deadline);deadline=setTimeout(()=>problem('Pokretanje traje predugo. Neophodni delovi možda još nisu učitani. Proverite vezu i pokušajte ponovo.'),Math.max(0,expiresAt-Date.now()));};
+        const cleanup=()=>{clearTimeout(deadline);window.removeEventListener('error',startupError,true);window.removeEventListener('pagehide',pause);window.removeEventListener('pageshow',resume);};
+        const problem=(message,stop=false)=>{
+            if(ready||reloading)return;
+            fatal=fatal||stop;clearTimeout(deadline);status.hidden=true;error.textContent=message;error.hidden=false;retry.hidden=false;retry.disabled=false;help.hidden=false;
+        };
+        const attempt=()=>{
+            if(ready||reloading||fatal||started||!factory||required.some(name=>!loaded.has(name)))return;
+            if(typeof window.React?.createElement!=='function'||typeof window.React?.useEffect!=='function'||typeof window.ReactDOM?.createRoot!=='function'||typeof window.Babel?.transform!=='function'||typeof window.lucide?.createIcons!=='function'||typeof window.firebaseDeps?.onAuthStateChanged!=='function'||!window.firebaseDeps?.auth||typeof window.attachmentService?.authChanged!=='function'){
+                problem('Neophodni delovi aplikacije nisu ispravno učitani. Proverite vezu i pokušajte ponovo.',true);return;
+            }
+            started=true;
+            try{factory();}catch{problem('Pokretanje aplikacije nije uspelo. Proverite vezu i pokušajte ponovo.',true);}
+        };
+        function startupError(event){
+            if(ready||reloading)return;
+            const name=event.target?.dataset?.gpDependency;
+            if(name){problem('Nije učitano: '+(labels[name]||'neophodni deo aplikacije')+'. Proverite vezu i pokušajte ponovo.',true);return;}
+            const source=String(event.filename||'');
+            if(source&&!/\/vendor\/html5-qrcode\.min\.js|^https:\/\/accounts\.google\.com\//.test(source))problem('Pokretanje aplikacije nije uspelo. Proverite vezu i pokušajte ponovo.',true);
+        }
+        window.garancijeBoot={
+            loaded(name){if(ready||reloading)return;loaded.add(name);attempt();},
+            failed(name){problem('Nije učitano: '+(labels[name]||'neophodni deo aplikacije')+'. Proverite vezu i pokušajte ponovo.',true);},
+            start(value){if(factory||started||ready||reloading)return;factory=value;attempt();},
+            ready(){if(!started||ready||reloading||fatal)return;ready=true;cleanup();root.hidden=false;shell.hidden=true;},
+            fail(message){problem(message);},
+            retry(){
+                if(ready||reloading||retry.hidden||retry.disabled)return;
+                reloading=true;cleanup();retry.disabled=true;retry.textContent='Ponovo učitavam…';
+                try{window.location.reload();}catch{reloading=false;retry.textContent='Pokušaj ponovo';problem('Ponovno učitavanje nije pokrenuto. Osvežite stranicu u pregledaču.');}
+            }
+        };
+        retry.setAttribute('aria-describedby','gp-boot-retry-help');retry.addEventListener('click',()=>window.garancijeBoot.retry());
+        window.addEventListener('error',startupError,true);window.addEventListener('pagehide',pause);window.addEventListener('pageshow',resume);
+        resume();
+    })();
+    </script>
+    <script defer data-gp-dependency="styles" src="https://cdn.tailwindcss.com/3.4.17" onload="window.garancijeBoot.loaded('styles')" onerror="window.garancijeBoot.failed('styles')"></script>
+    <script defer data-gp-dependency="lucide" src="https://unpkg.com/lucide@1.65.0/dist/umd/lucide.min.js" onload="window.garancijeBoot.loaded('lucide')" onerror="window.garancijeBoot.failed('lucide')"></script>
+    <script defer crossorigin data-gp-dependency="react" src="https://unpkg.com/react@18.3.1/umd/react.development.js" onload="window.garancijeBoot.loaded('react')" onerror="window.garancijeBoot.failed('react')"></script>
+    <script defer crossorigin data-gp-dependency="reactdom" src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" onload="window.garancijeBoot.loaded('reactdom')" onerror="window.garancijeBoot.failed('reactdom')"></script>
+    <script defer data-gp-dependency="babel" src="https://unpkg.com/@babel/standalone@8.0.10/babel.min.js" onload="window.garancijeBoot.loaded('babel')" onerror="window.garancijeBoot.failed('babel')"></script>
+    <script async src="./vendor/html5-qrcode.min.js"></script>
+    <script type="module" data-gp-dependency="firebase" onerror="window.garancijeBoot.failed('firebase')">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, onSnapshot, addDoc, updateDoc, doc, runTransaction, getDocFromServer, getDocsFromServer } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
@@ -229,6 +288,7 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         const db = getFirestore(app);
         const provider = new GoogleAuthProvider();
         window.firebaseDeps = { auth, db, appId: "registar-garancija-74a34", provider, signInWithPopup, signOut, onAuthStateChanged, collection, onSnapshot, addDoc, updateDoc, doc, runTransaction, getDocFromServer, getDocsFromServer };
+        window.garancijeBoot.loaded('firebase');
     </script>
 
     <script async defer src="https://accounts.google.com/gsi/client"></script>
@@ -1052,6 +1112,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 </script>
     <script type="text/babel" data-type="module">
+        window.garancijeBoot.start(() => {
         const { useState, useMemo, useEffect, useRef } = React;
 
         // Calendar dates are local dates; UTC is used only for day differences.
@@ -1715,7 +1776,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.30.1';
+        const RELEASE_VERSION = '2026.10.30.2';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2170,25 +2231,38 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             },[view,user?.uid,attachmentSection]);
 
             useEffect(() => {
-                let unsubscribe, active = true;
+                let unsubscribe, active = true, ended = false, subscribed = false;
                 setLoading(true); setAuthError('');
-                const fail = () => { if (active) { setAuthError('Povezivanje nije uspelo. Pokušajte ponovo.'); setLoading(false); } };
+                const stopWaiting = () => { clearInterval(timer); clearTimeout(timeout); };
+                const fail = () => {
+                    if (!active || ended) return;
+                    ended = true; stopWaiting();
+                    if (unsubscribe) { unsubscribe(); unsubscribe = undefined; }
+                    setAuthError('Povezivanje nije uspelo. Pokušajte ponovo.'); setLoading(false);
+                };
                 const connect = () => {
-                    if (!window.firebaseDeps) return;
-                    clearInterval(timer); clearTimeout(timeout);
+                    if (!active || ended || subscribed || !window.firebaseDeps) return;
+                    subscribed = true; clearInterval(timer);
                     try {
                         unsubscribe = window.firebaseDeps.onAuthStateChanged(window.firebaseDeps.auth, u => {
-                            if (!active) return;
+                            if (!active || ended) return;
+                            stopWaiting();
                             void window.attachmentService.authChanged?.(u);
                             setUser(u); setWarranties([]); setSelected(null); setView('list'); setLoading(false);
                         }, fail);
+                        if (!active || ended) { unsubscribe?.(); unsubscribe = undefined; }
                     } catch { fail(); }
                 };
                 const timer = setInterval(connect, 100);
-                const timeout = setTimeout(() => { clearInterval(timer); fail(); }, 10000);
+                const timeout = setTimeout(fail, 10000);
                 connect();
-                return () => { active = false; clearInterval(timer); clearTimeout(timeout); if (unsubscribe) unsubscribe(); };
+                return () => { active = false; stopWaiting(); if (unsubscribe) unsubscribe(); };
             }, [retry]);
+            useEffect(() => {
+                if (loading) return;
+                if (authError) window.garancijeBoot?.fail('Početna provera prijave nije potvrđena. Proverite vezu i pokušajte ponovo. Sačuvani podaci sajta nisu obrisani.');
+                else window.garancijeBoot?.ready();
+            }, [loading,authError]);
 
             useEffect(() => {
                 if (!user || !window.firebaseDeps) return;
@@ -2793,6 +2867,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
+        });
     </script>
 </body>
 </html>
