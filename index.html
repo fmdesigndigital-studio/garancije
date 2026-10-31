@@ -294,6 +294,21 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
 
     <script async defer src="https://accounts.google.com/gsi/client"></script>
     <script>
+// ATTACHMENT COUNT METADATA - scalar only; never opens a file or decodes an image.
+window.garancijeAttachmentCounts=(()=>{
+ const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
+ const ref=a=>object(a)&&typeof a.id==='string'&&typeof a.name==='string';
+ const legacy=v=>typeof v==='string'&&/^(data:image\/(jpeg|png|webp|gif);base64,|https?:\/\/)/i.test(v);
+ const display=record=>(Array.isArray(record?.attachments)?record.attachments:[]).filter(ref).length+
+  ['receiptImage','warrantyImage'].filter(k=>legacy(record?.[k])).length;
+ const known=record=>{
+  if(!object(record))return null;
+  if(record.attachments!=null&&(!Array.isArray(record.attachments)||!record.attachments.every(ref)))return null;
+  if(['receiptImage','warrantyImage'].some(k=>record[k]!=null&&record[k]!==''&&!legacy(record[k])))return null;
+  return display(record);
+ };
+ return Object.freeze({display,known});
+})();
 // INTEGRATION METADATA ADAPTER
 window.garancijeDeletionHash=async value=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(window.garancijeFingerprint(value))))].map(x=>x.toString(16).padStart(2,'0')).join('');
 window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'production',metadataStore:{
@@ -350,7 +365,38 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
    tx.delete(ref);return {deleted:true};
   });
  },
- async commit({id,userId,operationId,expected,metadata,attachments,isCurrent}) {
+  // Explicit one-shot maintenance. Fixed captured list; no listener writes or automatic retries.
+  async backfillAttachmentCounts({userId,records,isCurrent}) {
+   const d=window.firebaseDeps,deadline=Date.now()+60000;
+   const check=()=>{if(d.auth.currentUser?.uid!==userId||isCurrent?.()!==true||Date.now()>deadline)throw Error('Dopuna je zaustavljena. Proverite stanje pre novog pokusaja.');};
+   check();
+   if(!Array.isArray(records)||records.length>200)throw Error('Dopuna zahteva najvise 200 ucitanih zapisa. Nema upisa.');
+   const ids=new Set(),targets=records.map(({id,...record})=>{
+    if(typeof id!=='string'||!id||id.length>512||/[\/\u0000-\u001f\u007f]/u.test(id)||ids.has(id))throw Error('Spisak zapisa nije podrzan. Nema upisa.');
+    ids.add(id);return {id,record,expected:window.garancijeFingerprint(record)};
+   });
+   const report={updated:0,unchanged:0,skipped:0,conflicts:0,uncertain:0,stopped:false};
+   for(const target of targets){
+    if(target.id==='gp-live-integration-test-001'||target.record._attachmentDeletion||window.garancijeAttachmentCounts.known(target.record)===null){report.skipped++;continue;}
+    try{
+     check();const ref=d.doc(d.db,'artifacts',d.appId,'users',userId,'warranties',target.id);
+     const outcome=await d.runTransaction(d.db,async tx=>{
+      check();const snapshot=await tx.get(ref);check();
+      if(!snapshot.exists())return 'conflicts';
+      const current=snapshot.data();
+      if(window.garancijeFingerprint(current)!==target.expected)return 'conflicts';
+      if(current._attachmentDeletion)return 'skipped';
+      const attachmentCount=window.garancijeAttachmentCounts.known(current);
+      if(attachmentCount===null)return 'skipped';
+      if(current.attachmentCount===attachmentCount)return 'unchanged';
+      check();tx.update(ref,{attachmentCount});return 'updated';
+     },{maxAttempts:1});
+     report[outcome]++;
+    }catch{report.stopped=true;report.uncertain=1;break;}
+   }
+   return report;
+  },
+  async commit({id,userId,operationId,expected,metadata,attachments,isCurrent}) {
   const d=window.firebaseDeps;const check=()=>{if(d.auth.currentUser?.uid!==userId||isCurrent?.()===false)throw Error('Nalog ili pokušaj čuvanja se promenio.');};check();
   const ref=d.doc(d.db,'artifacts',d.appId,'users',userId,'warranties',id);
   return d.runTransaction(d.db,async tx=>{
@@ -359,7 +405,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
    if(current?.lastOperation===operationId)return;
    if(window.garancijeFingerprint(current)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je očuvan.');
    const safe=Object.fromEntries(['name','category','purchaseDate','baseMonths','extendedMonths','store','description','purchasePriceMinor','currency','invoiceNumber','fiscalReceiptUrl'].map(k=>[k,metadata[k]]).filter(([,v])=>v!==undefined));
-   check();tx.set(ref,{...safe,attachments,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
+   const attachmentCount=window.garancijeAttachmentCounts.known({...current,attachments});
+   check();tx.set(ref,{...safe,attachments,attachmentCount,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
   });
  }
 }};
@@ -906,6 +953,12 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     connected(attempt, user, true);
                 } catch (error) { if (attempt === generation) { disconnect(); state = 'error'; message = error.message; notify(); } }
                 finally {inFlight.delete(oauthController); if (connecting === attempt) connecting = null; }
+            },
+            async withAttachmentCountMaintenance(userId,action) {
+                return lock(async()=>{
+                    const check=()=>{assertUser(userId);if(journal().draft!=null||pendingCommits.size)throw Error('Prvo zavrsite postojeci nacrt ili cuvanje. Nista nije odbaceno.');return true;};
+                    check();return action(check);
+                });
             },
             pendingFingerprint: pending => canonical(pendingMetadata(pending)),
             contentRevision: draftRevision,
@@ -1777,7 +1830,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.30.3';
+        const RELEASE_VERSION = '2026.10.31.1';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2052,7 +2105,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 {listState==='error'&&<div role="alert" className="error">Garancije nisu učitane. <button type="button" onClick={onRetry}>Pokušaj ponovo</button></div>}
                 {listState==='ready'&&!rows.length&&<div className="empty-state"><Icon name="search"/><h3>{all.length?'Nema rezultata':'Još nema garancija'}</h3><p className="muted">{all.length?'Probajte drugi naziv ili poništite filtere. Vaša evidencija je sačuvana.':'Počnite ili nastavite unos glavnom akcijom iznad.'}</p></div>}
                 {mode==='detailed'?<table className="details-table" role="table" aria-label="Detaljni pregled garancija"><thead role="rowgroup"><tr role="row">{['Proizvod','Kategorija','Prodavnica','Kupljeno','Ističe','Status','Opis','Prilozi'].map(h=><th role="columnheader" scope="col" key={h}>{h}</th>)}</tr></thead><tbody role="rowgroup">{(listState==='ready'?rows:[]).map(({w,exp,days})=><tr role="row" key={w.id}>{[
-                    ['Proizvod',<button type="button" className="catalog-open" onClick={()=>onOpen(w)}>{textValue(w.name)||'Bez naziva'}</button>],['Kategorija',categoryLabel(w.category)],['Prodavnica',textValue(w.store)||'—'],['Kupljeno',fmtDate(parseDate(w.purchaseDate))],['Ističe',fmtDate(exp)],['Status',getStyle(days).l],['Opis',textValue(w.description)||'—'],['Prilozi',legacyAttachments(w).length+attachmentRefs(w).length]
+                    ['Proizvod',<button type="button" className="catalog-open" onClick={()=>onOpen(w)}>{textValue(w.name)||'Bez naziva'}</button>],['Kategorija',categoryLabel(w.category)],['Prodavnica',textValue(w.store)||'—'],['Kupljeno',fmtDate(parseDate(w.purchaseDate))],['Ističe',fmtDate(exp)],['Status',getStyle(days).l],['Opis',textValue(w.description)||'—'],['Prilozi',window.garancijeAttachmentCounts.display(w)]
                 ].map(([label,value])=><td role="cell" key={label}><span className="catalog-cell-label">{label}: </span>{value}</td>)}</tr>)}</tbody></table>:
                 <div className={mode==='cards'?'products-grid':'products-list'}>{(listState==='ready'?rows:[]).map(({w,exp,days})=> mode==='list'?
                     <button type="button" key={w.id} onClick={()=>onOpen(w)} className="product-list-link"><CategoryIcon category={w.category}/><span><strong className="list-name">{textValue(w.name)||'Bez naziva'}</strong><span className="list-meta"><span>{categoryLabel(w.category)}</span><span>Ističe: {fmtDate(exp)}</span></span></span><StatusPill days={days}/></button>:
@@ -2139,6 +2192,35 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     <button type="button" onClick={()=>{setOpen(false);trigger.current?.focus({preventScroll:true});}}>Razumem</button>
                 </div>
             </div>;
+        }
+
+        function AttachmentCountRepair({user,records,listState,draftStatus,onBusy}) {
+            const [confirmed,setConfirmed]=useState(false),[phase,setPhase]=useState('idle'),[report,setReport]=useState(null);
+            const running=useRef(false),live=useRef(true);
+            useEffect(()=>{live.current=true;return()=>{live.current=false;};},[]);
+            const start=async()=>{
+                if(running.current||phase!=='idle'||!confirmed||listState!=='ready'||draftStatus!=='none')return;
+                running.current=true;setPhase('running');onBusy(true);
+                try{
+                    const result=await window.attachmentService.withAttachmentCountMaintenance(user.uid,async guard=>{
+                        const isCurrent=()=>{guard();return live.current&&window.firebaseDeps.auth.currentUser?.uid===user.uid;};
+                        return window.driveEnvironment.metadataStore.backfillAttachmentCounts({userId:user.uid,records:structuredClone(records),isCurrent});
+                    });
+                    if(live.current){setReport(result);setPhase(result.stopped?'stopped':'done');}
+                }catch{if(live.current)setPhase('stopped');}
+                finally{onBusy(false);}
+            };
+            return <section className="panel"><h2>Broj priloga za ChatGPT</h2>
+                <p>Jednokratno dopunjuje samo broj priloga postojecih garancija. Ne otvara Drive i ne menja priloge. Novi unosi cuvaju broj automatski.</p>
+                <p>Prvo zavrsite nacrte i cuvanje na svim uredjajima. Zatvorite stare kartice aplikacije; ostavite samo ovu osvezenu verziju. Ne odbacujte nezavrsene nacrte.</p>
+                <label><input type="checkbox" checked={confirmed} disabled={phase!=='idle'} onChange={e=>setConfirmed(e.target.checked)}/>Zavrsio/la sam nacrte i zatvorio/la stare kartice na svim uredjajima.</label>
+                <button type="button" className="detail-actions" disabled={!confirmed||phase!=='idle'||listState!=='ready'||draftStatus!=='none'} onClick={start}>Dopuni broj priloga</button>
+                {draftStatus!=='none'&&<p role="status">Prvo bezbedno zavrsite postojeci nacrt i cuvanje.</p>}
+                {phase==='running'&&<p role="status">Dopuna je u toku. Sacekajte potvrdu.</p>}
+                {report&&<p role="status">Dopunjeno: {report.updated}; vec uskladjeno: {report.unchanged}; preskoceno: {report.skipped}; konkurentno promenjeno: {report.conflicts}.</p>}
+                {phase==='done'&&<p role="status">Jednokratna provera je zavrsena. Nema daljeg pozadinskog upisa.</p>}
+                {phase==='stopped'&&<p role="alert">Dopuna je zaustavljena. Ishod poslednjeg zahteva mozda nije potvrdjen. Ne ponavljajte radnju naslepo; osvezite prikaz i proverite stanje. Nacrti nisu odbaceni.</p>}
+            </section>;
         }
 
         function App() {
@@ -2340,7 +2422,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     </div>
                     {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} requireEmptyDraft={newEntry} expectedResume={resumeEntry} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>returnTo(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list',true)} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list',true);setNotice('Nacrt je odbačen.');}} user={user}/></div>}
                     {view==='detail'&&selected&&<Detail onEdit={()=>openForm(selected)} onAddAttachment={()=>openForm(selected,true)} onBusy={setFormBusy} onDeleted={message=>{setNotice(message);finishNavigation('list',true);}} item={warranties.find(w=>w.id===selected.id)||selected} onBack={()=>returnTo('list')} user={user}/>}
-                    {view==='settings'&&<section className="page-content settings-shell"><button type="button" className="quiet back-button" disabled={formBusy} onClick={()=>navigate('list')}><Icon name="arrow-left"/>Moja evidencija</button><h1 data-page-heading tabIndex={-1}>Podešavanja</h1><section className="panel"><h2>Nalog</h2><p className="small muted">Odjava ne briše lokalne fotografije nedovršenog nacrta. Brisanje podataka sajta može ih ukloniti.</p><p className="account-name">{textValue(user.email)||'Prijavljeni nalog'}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={logout}><Icon name="log-out"/> Odjavi se</button></section><section className="panel"><DriveConnection/></section><section className="panel"><h2>Verzija i nacrt</h2><p>Verzija {RELEASE_VERSION}</p>{currentDraftStatus==='error'&&draftStatusWarning}<button type="button" className="detail-actions" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="detail-actions" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</section></section>}
+                    {view==='settings'&&<section className="page-content settings-shell"><button type="button" className="quiet back-button" disabled={formBusy} onClick={()=>navigate('list')}><Icon name="arrow-left"/>Moja evidencija</button><h1 data-page-heading tabIndex={-1}>Podešavanja</h1><section className="panel"><h2>Nalog</h2><p className="small muted">Odjava ne briše lokalne fotografije nedovršenog nacrta. Brisanje podataka sajta može ih ukloniti.</p><p className="account-name">{textValue(user.email)||'Prijavljeni nalog'}</p><button type="button" className="detail-actions" disabled={formBusy} onClick={logout}><Icon name="log-out"/> Odjavi se</button></section><section className="panel"><DriveConnection/></section><AttachmentCountRepair user={user} records={warranties} listState={listState} draftStatus={currentDraftStatus} onBusy={setFormBusy}/><section className="panel"><h2>Verzija i nacrt</h2><p>Verzija {RELEASE_VERSION}</p>{currentDraftStatus==='error'&&draftStatusWarning}<button type="button" className="detail-actions" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="detail-actions" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</section></section>}
                     <nav className="bottom-nav" aria-label="Glavna navigacija">
                         <button type="button" aria-current={view==='list'?'page':undefined} disabled={formBusy} onClick={()=>navigate('list')}><Icon name="layout-grid"/><span>Proizvodi</span></button>
                         <button type="button" aria-current={view==='add'||view==='edit'?'page':undefined} disabled={draftActionDisabled||view==='add'||view==='edit'} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/><span>Dodaj proizvod</span></button>
@@ -2862,7 +2944,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     ['Prodavnica',textValue(item.store)||'Nije uneta'],['Plaćena cena',Number.isSafeInteger(item.purchasePriceMinor)&&item.purchasePriceMinor>=0?priceText(item.purchasePriceMinor)+' '+textValue(item.currency):'Nije uneta'],['Datum kupovine',fmtDate(parseDate(item.purchaseDate))],['Garancija važi do',fmtDate(exp)],['Osnovna garancija',textValue(String(item.baseMonths??''))+' meseci'],['Produžena garancija',String(item.extendedMonths??0)+' meseci'],['Broj računa',textValue(item.invoiceNumber)||'Nije unet'],['Opis',textValue(item.description)||'Nije unet']
                 ].map(([label,value])=><div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{!exp&&<p role="status" className="notice">Ovaj zapis ima nepotpune ili neispravne podatke. Izmenite ga da biste dobili tačan datum isteka.</p>}
                 {(()=>{try{const link=fiscalLink(item.fiscalReceiptUrl);return <a href={link.url} target="_blank" rel="noopener noreferrer" className="catalog-button inline-block detail-actions">Otvori fiskalni račun</a>;}catch{return null;}})()}</section>
-                <section className="panel"><div className="row spread"><h2>Dokumenti</h2><span className="demo-badge">{legacyAttachments(item).length+attachmentRefs(item).length} priloga</span></div><AttachmentList attachments={[...legacyAttachments(item),...attachmentRefs(item)]} user={user}/>{legacyAttachments(item).length>0&&<p className="small muted">Stari inline prilozi su već deo učitanog zapisa; nisu migrirani.</p>}</section></div>
+                <section className="panel"><div className="row spread"><h2>Dokumenti</h2><span className="demo-badge">{window.garancijeAttachmentCounts.display(item)} priloga</span></div><AttachmentList attachments={[...legacyAttachments(item),...attachmentRefs(item)]} user={user}/>{legacyAttachments(item).length>0&&<p className="small muted">Stari inline prilozi su već deo učitanog zapisa; nisu migrirani.</p>}</section></div>
                 <div className="row detail-actions"><button type="button" className="danger icon-button" aria-label="Obriši garanciju" disabled={!canDelete||deleting} onClick={del}><Icon name="trash-2"/>{deleting?'Pregled brisanja…':item._attachmentDeletion?'Nastavi brisanje':'Obriši garanciju'}</button></div>
             </section>;
         }
