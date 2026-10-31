@@ -307,7 +307,15 @@ window.garancijeAttachmentCounts=(()=>{
   if(['receiptImage','warrantyImage'].some(k=>record[k]!=null&&record[k]!==''&&!legacy(record[k])))return null;
   return display(record);
  };
- return Object.freeze({display,known});
+ const validName=value=>typeof value==='string'&&value.trim().length>0&&Array.from(value).length<=256&&
+  !/[\p{Cc}\p{Cf}\/\\]/u.test(value)&&!/^\s*(?:data:|https?:)/i.test(value);
+ const names=record=>{
+  const count=known(record);if(count===null||count>200)return null;
+  const result=['receiptImage','warrantyImage'].filter(k=>legacy(record[k])).map(()=>null);
+  for(const item of record.attachments??[])result.push(validName(item.name)?item.name:null);
+  return result;
+ };
+ return Object.freeze({display,known,names,validName});
 })();
 // INTEGRATION METADATA ADAPTER
 window.garancijeDeletionHash=async value=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(window.garancijeFingerprint(value))))].map(x=>x.toString(16).padStart(2,'0')).join('');
@@ -366,7 +374,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
   });
  },
   // Explicit one-shot maintenance. Fixed captured list; no listener writes or automatic retries.
-  async backfillAttachmentCounts({userId,records,isCurrent}) {
+  async backfillAttachmentNames({userId,records,isCurrent}) {
    const d=window.firebaseDeps,deadline=Date.now()+60000;
    const check=()=>{if(d.auth.currentUser?.uid!==userId||isCurrent?.()!==true||Date.now()>deadline)throw Error('Dopuna je zaustavljena. Proverite stanje pre novog pokusaja.');};
    check();
@@ -375,7 +383,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
     if(typeof id!=='string'||!id||id.length>512||/[\/\u0000-\u001f\u007f]/u.test(id)||ids.has(id))throw Error('Spisak zapisa nije podrzan. Nema upisa.');
     ids.add(id);return {id,record,expected:window.garancijeFingerprint(record)};
    });
-   const report={updated:0,unchanged:0,skipped:0,conflicts:0,uncertain:0,stopped:false};
+   const report={updated:0,unchanged:0,skipped:0,conflicts:0,countMismatches:0,uncertain:0,stopped:false};
    for(const target of targets){
     if(target.id==='gp-live-integration-test-001'||target.record._attachmentDeletion||window.garancijeAttachmentCounts.known(target.record)===null){report.skipped++;continue;}
     try{
@@ -388,8 +396,11 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
       if(current._attachmentDeletion)return 'skipped';
       const attachmentCount=window.garancijeAttachmentCounts.known(current);
       if(attachmentCount===null)return 'skipped';
-      if(current.attachmentCount===attachmentCount)return 'unchanged';
-      check();tx.update(ref,{attachmentCount});return 'updated';
+      if(!Number.isSafeInteger(current.attachmentCount)||current.attachmentCount!==attachmentCount)return 'countMismatches';
+      const attachmentNames=window.garancijeAttachmentCounts.names(current);
+      if(attachmentNames===null)return 'skipped';
+      if(window.garancijeFingerprint(current.attachmentNames)===window.garancijeFingerprint(attachmentNames))return 'unchanged';
+      check();tx.update(ref,{attachmentNames});return 'updated';
      },{maxAttempts:1});
      report[outcome]++;
     }catch{report.stopped=true;report.uncertain=1;break;}
@@ -405,8 +416,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
    if(current?.lastOperation===operationId)return;
    if(window.garancijeFingerprint(current)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je očuvan.');
    const safe=Object.fromEntries(['name','category','purchaseDate','baseMonths','extendedMonths','store','description','purchasePriceMinor','currency','invoiceNumber','fiscalReceiptUrl'].map(k=>[k,metadata[k]]).filter(([,v])=>v!==undefined));
-   const attachmentCount=window.garancijeAttachmentCounts.known({...current,attachments});
-   check();tx.set(ref,{...safe,attachments,attachmentCount,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
+   const attachmentRecord={...current,attachments};
+   const attachmentCount=window.garancijeAttachmentCounts.known(attachmentRecord);
+   const attachmentNames=window.garancijeAttachmentCounts.names(attachmentRecord);
+   check();tx.set(ref,{...safe,attachments,attachmentCount,attachmentNames,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
   });
  }
 }};
@@ -1830,7 +1843,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.31.1';
+        const RELEASE_VERSION = '2026.10.31.2';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2204,20 +2217,20 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 try{
                     const result=await window.attachmentService.withAttachmentCountMaintenance(user.uid,async guard=>{
                         const isCurrent=()=>{guard();return live.current&&window.firebaseDeps.auth.currentUser?.uid===user.uid;};
-                        return window.driveEnvironment.metadataStore.backfillAttachmentCounts({userId:user.uid,records:structuredClone(records),isCurrent});
+                        return window.driveEnvironment.metadataStore.backfillAttachmentNames({userId:user.uid,records:structuredClone(records),isCurrent});
                     });
                     if(live.current){setReport(result);setPhase(result.stopped?'stopped':'done');}
                 }catch{if(live.current)setPhase('stopped');}
                 finally{onBusy(false);}
             };
-            return <section className="panel"><h2>Broj priloga za ChatGPT</h2>
-                <p>Jednokratno dopunjuje samo broj priloga postojecih garancija. Ne otvara Drive i ne menja priloge. Novi unosi cuvaju broj automatski.</p>
+            return <section className="panel"><h2>Nazivi priloga za ChatGPT</h2>
+                <p>Jednokratno dopunjuje samo listu naziva priloga postojecih garancija. Broj mora vec biti uskladjen. Ne otvara Drive i ne menja priloge. Nova cuvanja azuriraju broj i nazive zajedno. Za stari prilog bez zabelezenog naziva ime ostaje nepoznato.</p>
                 <p>Prvo zavrsite nacrte i cuvanje na svim uredjajima. Zatvorite stare kartice aplikacije; ostavite samo ovu osvezenu verziju. Ne odbacujte nezavrsene nacrte.</p>
                 <label><input type="checkbox" checked={confirmed} disabled={phase!=='idle'} onChange={e=>setConfirmed(e.target.checked)}/>Zavrsio/la sam nacrte i zatvorio/la stare kartice na svim uredjajima.</label>
-                <button type="button" className="detail-actions" disabled={!confirmed||phase!=='idle'||listState!=='ready'||draftStatus!=='none'} onClick={start}>Dopuni broj priloga</button>
+                <button type="button" className="detail-actions" disabled={!confirmed||phase!=='idle'||listState!=='ready'||draftStatus!=='none'} onClick={start}>Dopuni nazive priloga</button>
                 {draftStatus!=='none'&&<p role="status">Prvo bezbedno zavrsite postojeci nacrt i cuvanje.</p>}
                 {phase==='running'&&<p role="status">Dopuna je u toku. Sacekajte potvrdu.</p>}
-                {report&&<p role="status">Dopunjeno: {report.updated}; vec uskladjeno: {report.unchanged}; preskoceno: {report.skipped}; konkurentno promenjeno: {report.conflicts}.</p>}
+                {report&&<p role="status">Dopunjeno: {report.updated}; vec uskladjeno: {report.unchanged}; preskoceno: {report.skipped}; konkurentno promenjeno: {report.conflicts}; neuskladjen broj priloga: {report.countMismatches}.</p>}
                 {phase==='done'&&<p role="status">Jednokratna provera je zavrsena. Nema daljeg pozadinskog upisa.</p>}
                 {phase==='stopped'&&<p role="alert">Dopuna je zaustavljena. Ishod poslednjeg zahteva mozda nije potvrdjen. Ne ponavljajte radnju naslepo; osvezite prikaz i proverite stanje. Nacrti nisu odbaceni.</p>}
             </section>;
