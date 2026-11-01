@@ -1367,6 +1367,85 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             getAbandonedDrafts(userId) {
                 assertUser(userId);return Object.values(journal().abandonedDrafts||{}).filter(x=>x?.userId===userId).map(x=>structuredClone(x));
             },
+            async checkAbandonedTransfer({userId,operationId,expected}) {
+                assertUser(userId);
+                return lock(async()=>{
+                    let archive=journal().abandonedDrafts?.[operationId];const active=canonical(journal().draft);
+                    if(!archive||archive.userId!==userId||archive.closed||canonical(archive)!==expected)throw staleDraft();
+                    mutateJournal(j=>{if(canonical(j.abandonedDrafts?.[operationId])!==expected)throw staleDraft();j.abandonedDrafts[operationId]={...archive,check:{complete:false,status:'checking'}};});
+                    archive=journal().abandonedDrafts[operationId];expected=canonical(archive);
+                    const check=()=>{
+                        assertUser(userId);needToken();
+                        if(!archive||archive.userId!==userId||archive.closed||canonical(archive)!==expected||canonical(journal().abandonedDrafts?.[operationId])!==expected||canonical(journal().draft)!==active)throw staleDraft();
+                        return true;
+                    };
+                    check();
+                    if(archive.version!==1||!Array.isArray(archive.pending)||archive.pending.length>200||!archive.jobs||typeof archive.jobs!=='object')throw Error('Evidencija prenosa nije podrzana.');
+                    const record=await readMetadata(archive.id,userId,check);check();
+                    const list=()=>bounded(async valid=>{const rows=await options.metadataStore.list(userId);valid();if(!Array.isArray(rows))throw Error('Potpune reference nisu dostupne.');return rows;},{ms:waits.read,current:check});
+                    const records=await list(),references=new Map();
+                    for(const row of records){
+                        if(row.attachments!=null&&!Array.isArray(row.attachments))throw Error('Reference nisu potpune.');
+                        if(row._attachmentEdit){const op=savedHelper.valid(row._attachmentEdit,userId);for(const t of op.targets){const ids=references.get(t.fileId)||[];ids.push(row.id+':operacija');references.set(t.fileId,ids);}}
+                        for(const a of row.attachments||[]){if(!a||typeof a!=='object'||(a.driveFileId!=null&&(typeof a.driveFileId!=='string'||!a.driveFileId)))throw Error('Reference nisu podrzane.');if(a.driveFileId){const ids=references.get(a.driveFileId)||[];ids.push(row.id);references.set(a.driveFileId,ids);}}
+                    }
+                    if(journal().draft)for(const a of journal().draft.attachments||[]){if(a.driveFileId){const ids=references.get(a.driveFileId)||[];ids.push('nacrt:'+journal().draft.id);references.set(a.driveFileId,ids);}}
+                    const fields='id,name,mimeType,size,appProperties,trashed,ownedByMe,shared,permissions(type,role,emailAddress),sha256Checksum';
+                    const files=new Map(),hashes=new Map();
+                    const verify=(f,a,key)=>{
+                        if(!f||typeof f.id!=='string'||!f.id||typeof f.name!=='string'||typeof f.trashed!=='boolean'||f.mimeType!==a.mime||Number(f.size)!==a.size||f.appProperties?.app!=='garancije-pro'||f.appProperties?.operation!==key||f.appProperties?.sha256!==a.sha256||f.ownedByMe!==true||f.shared!==false||!Array.isArray(f.permissions)||!f.permissions.length||f.permissions.some(p=>p.type!=='user'||p.role!=='owner'||p.emailAddress?.toLowerCase()!==EMAIL)||(f.sha256Checksum!=null&&f.sha256Checksum.toLowerCase()!==a.sha256))throw Error('Identitet ili vlasnistvo fajla nisu pouzdano potvrdjeni.');
+                        const finding={id:f.id,name:f.name,trashed:f.trashed,operationHash:key,references:references.get(f.id)||[]};
+                        if(files.has(f.id)&&canonical(files.get(f.id))!==canonical(finding))throw Error('Nalaz fajla se promenio.');
+                        files.set(f.id,finding);if(files.size>1000)throw Error('Pretraga nije potpuna: previse rezultata.');
+                    };
+                    for(const a of archive.pending){
+                        if(!a||!/^[a-f0-9]{64}$/.test(a.sha256)||!Number.isSafeInteger(a.size)||a.size<0||typeof a.mime!=='string')throw Error('Identitet originala nije potvrdjen.');
+                        const key=await hashText('upload:'+operationId+':'+a.sha256);check();
+                        if(hashes.has(key)){const old=hashes.get(key);if(old.size!==a.size||old.mime!==a.mime)throw Error('Identitet duplog originala nije pouzdan.');continue;}hashes.set(key,a);
+                        let pageToken,seen=new Set();
+                        do{
+                            const query=new URLSearchParams({q:"appProperties has { key='operation' and value='"+key+"' }",spaces:'drive',pageSize:'100',fields:'nextPageToken,incompleteSearch,files('+fields+')'});
+                            if(pageToken)query.set('pageToken',pageToken);
+                            const page=await ordinaryRequest(API+'/files?'+query,{},json,{current:check});check();
+                            if(!page||!Array.isArray(page.files)||page.incompleteSearch===true||(page.incompleteSearch!==undefined&&page.incompleteSearch!==false))throw Error('Drive pretraga nije potpuna.');
+                            for(const f of page.files)verify(f,a,key);
+                            pageToken=page.nextPageToken;
+                            if(pageToken!==undefined&&(typeof pageToken!=='string'||!pageToken||seen.has(pageToken)||seen.size>=200))throw Error('Drive stranice nisu potpune.');
+                            if(pageToken)seen.add(pageToken);
+                        }while(pageToken);
+                    }
+                    for(const [key,job]of Object.entries(archive.jobs)){
+                        const a=hashes.get(key);
+                        if(!a||!job||typeof job.id!=='string'||!job.id)throw Error('Rezervisani identitet nije podrzan.');
+                        const f=await ordinaryRequest(API+'/files/'+encodeURIComponent(job.id)+'?fields='+fields,{},json,{current:check});check();
+                        if(f.id!==job.id)throw Error('ID fajla se ne poklapa.');verify(f,a,key);
+                    }
+                    const fresh=await readMetadata(archive.id,userId,check),freshRecords=await list();check();
+                    if(canonical(record)!==canonical(fresh)||canonical(records)!==canonical(freshRecords))throw Error('Podaci su promenjeni tokom provere. Ponovite proveru.');
+                    const result={complete:true,status:record?.lastOperation===operationId?'confirmed_commit':files.size?'files_found':'no_accessible_files',checkedAt:new Date(now()).toISOString(),serverFingerprint:await hashText(canonical(record)),files:[...files.values()]};
+                    mutateJournal(j=>{check();j.abandonedDrafts[operationId]={...archive,check:result};});
+                    if(canonical(journal().abandonedDrafts?.[operationId]?.check)!==canonical(result))throw Error('Nalaz nije pouzdano sacuvan.');
+                    notify();return result;
+                });
+            },
+            async closeAbandonedTransfer({userId,operationId,expected}) {
+                assertUser(userId);
+                return lock(async()=>{
+                    const archive=journal().abandonedDrafts?.[operationId],active=canonical(journal().draft);
+                    const check=()=>{assertUser(userId);if(!archive||archive.userId!==userId||archive.closed||canonical(archive)!==expected||canonical(journal().abandonedDrafts?.[operationId])!==expected||canonical(journal().draft)!==active)throw staleDraft();return true;};
+                    check();if(archive.check?.complete!==true||!['confirmed_commit','files_found','no_accessible_files'].includes(archive.check.status))throw Error('Prvo zavrsite potpunu proveru prenosa.');
+                    const record=await readMetadata(archive.id,userId,check);check();
+                    if(await hashText(canonical(record))!==archive.check.serverFingerprint)throw Error('Garancija je promenjena. Ponovite proveru.');
+                    const audit={closedAt:new Date(now()).toISOString(),status:archive.check.status,check:archive.check};
+                    mutateJournal(j=>{check();j.abandonedDrafts[operationId]={...archive,closeAudit:audit};});
+                    const saved=journal().abandonedDrafts?.[operationId];
+                    if(canonical(saved)!==canonical({...archive,closeAudit:audit}))throw Error('Evidencija zatvaranja nije potvrdjena. Upozorenje ostaje.');
+                    assertUser(userId);
+                    if(canonical(journal().draft)!==active)throw staleDraft();
+                    mutateJournal(j=>{if(canonical(j.abandonedDrafts?.[operationId])!==canonical(saved))throw staleDraft();j.abandonedDrafts[operationId]={...saved,closed:true};});
+                    notify();return {closed:true,evidenceRetained:true};
+                });
+            },
             async discardDraft({userId,id,operationId,expected,expectedRevision}) {
                 assertUser(userId);
                 return lock(()=>navigator.locks.request(namespace+':commit:'+commitKey(userId,operationId),{ifAvailable:true},async lease=>{
@@ -2154,7 +2233,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.01.4';
+        const RELEASE_VERSION = '2026.11.01.5';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2548,11 +2627,19 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         }
 
         function AbandonedDraftRecovery({user}) {
-            const service=window.attachmentService,[,refresh]=useState(0);
+            const service=window.attachmentService,[,refresh]=useState(0),[details,setDetails]=useState({}),[busy,setBusy]=useState(false),[error,setError]=useState(''),running=useRef(false);
             useEffect(()=>service.subscribe(()=>refresh(v=>v+1)),[service]);
-            let rows=[];try{rows=service.getAbandonedDrafts(user.uid);}catch(e){return <p role="alert">{e.message}</p>;}
+            let rows=[];try{rows=service.getAbandonedDrafts(user.uid).filter(r=>!r.closed);}catch(e){return <p role="alert">{e.message}</p>;}
+            const act=async(r,close=false)=>{
+                if(running.current)return;
+                if(close&&!window.confirm('Zatvori upozorenje i sacuvaj evidenciju? Ovo ne brise fajlove niti dozvoljava novo slanje iste nerazresene slike.'))return;
+                running.current=true;setBusy(true);setError('');
+                try{await service[close?'closeAbandonedTransfer':'checkAbandonedTransfer']({userId:user.uid,operationId:r.operationId,expected:window.garancijeFingerprint(r)});}
+                catch(e){setError(e.message);}
+                finally{running.current=false;setBusy(false);refresh(v=>v+1);}
+            };
             if(!rows.length)return null;
-            return <section className="notice" aria-label="Odbaceni nacrti za oporavak"><h2>Nedovrseni prenosi iz odbacenih nacrta</h2><p>Aktivni nacrti su odbaceni. Fajlovi na Drive-u nisu brisani. Ove operacije se ne nastavljaju automatski. Sacuvajte podatke sajta dok se prenosi ne provere.</p>{rows.map(r=><details key={r.operationId}><summary>{r.name} — potrebna provera prenosa</summary><p>Garancija: {r.id} · Operacija: {r.operationId}</p>{Object.entries(r.jobs).map(([key,j])=><p key={key}>{j.name} · ID: {j.id} · {j.state}</p>)}{!Object.keys(r.jobs).length&&<p>Nema rezervisanog ID-a; spoljna faza ostaje zabelezena za proveru.</p>}</details>)}</section>;
+            return <section className="notice" aria-label="Odbaceni nacrti za oporavak"><h2>Nedovrseni prenosi iz odbacenih nacrta</h2><p>Aktivni nacrti su odbaceni. Fajlovi se ne brisu niti se prenosi automatski nastavljaju. Provera cita samo metapodatke preko postojece Drive veze.</p>{rows.map(r=><div key={r.operationId}><p>{r.name}</p><button type="button" style={{minHeight:48}} aria-expanded={!!details[r.operationId]} aria-controls={'transfer-'+r.operationId} onClick={()=>setDetails(d=>({...d,[r.operationId]:!d[r.operationId]}))}>{details[r.operationId]?'Sakrij detalje':'Prikaži detalje prenosa'}</button>{details[r.operationId]&&<div id={'transfer-'+r.operationId}><p>Garancija: {r.id} · Operacija: {r.operationId}</p>{Object.entries(r.jobs).map(([key,j])=><p key={key}>{j.name} · ID: {j.id} · {j.state}</p>)}{!Object.keys(r.jobs).length&&<p>Nema rezervisanog ID-a. To samo po sebi ne dokazuje upload.</p>}</div>}<button type="button" style={{minHeight:48}} disabled={busy} onClick={()=>act(r)}>Proveri prenos</button>{r.check?.complete&&<div role="status"><p>{r.check.status==='confirmed_commit'?'Potvrdjeno cuvanje: sacuvana garancija je ocuvana.':r.check.status==='files_found'?'Pronadjeni fajlovi nisu brisani. Za dalju radnju potrebna je zasebna odluka.':'Nije pronađen fajl dostupan ovoj aplikaciji. Ovo nije dokaz da fajl nigde ne postoji.'}</p>{r.check.files.map(f=><p key={f.id}>{f.name} · ID: {f.id} · {f.trashed?'u korpi':'dostupan'} · reference: {f.references.join(', ')||'nisu pronadjene u ucitanoj evidenciji'}</p>)}<button type="button" style={{minHeight:48}} disabled={busy} onClick={()=>act(r,true)}>Zatvori upozorenje i sačuvaj evidenciju</button></div>}</div>)}{error&&<p role="alert">{error}</p>}</section>;
         }
 
         function SavedAttachmentRecovery({records,user,onOpen}) {

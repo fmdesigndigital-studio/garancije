@@ -39,7 +39,7 @@ async function harness(config={}){
    if(config.loseRenameCommit&&pending.some(x=>x.patch.lastOperation)){config.loseRenameCommit=false;throw Error('SYNTHETIC_SAVE_RESPONSE_LOST');}
    return clone(value);
   }};window.firebaseDeps=d;
- const context=vm.createContext({window,navigator,crypto:webcrypto,URL,Blob,Response,Headers,AbortController,DOMException,TextEncoder,TextDecoder,structuredClone,
+ const context=vm.createContext({window,navigator,crypto:webcrypto,URL,URLSearchParams,Blob,Response,Headers,AbortController,DOMException,TextEncoder,TextDecoder,structuredClone,
   console:{log(){}},setTimeout(fn,ms){const t=setTimeout(fn,ms);t.unref?.();return t;},clearTimeout});
  vm.runInContext(config.legacyNullBug?script.replace('const existing=record?._attachmentEdit;','const existing=record._attachmentEdit;'):script,context);user.email=/const EMAIL = '([^']+)'/.exec(script)[1];
  const products=/products:\s*'([^']+)'/.exec(script)[1],scope=/const SCOPE = '([^']+)'/.exec(script)[1],remote=config.remote??new Map();
@@ -69,6 +69,7 @@ async function harness(config={}){
     mimeType:'application/vnd.google-apps.folder',parents:kind==='root'?[]:[folders.root],ownedByMe:true,trashed:false,
     permissions:[{type:'user',role:'owner',emailAddress:user.email}]}));
   }
+  if(u.pathname==='/drive/v3/files'){config.onRecovery?.();if(config.recoveryOffline)throw Error('SYNTHETIC_OFFLINE');if(config.recoveryStatus)return new Response('{}',{status:config.recoveryStatus});const page=u.searchParams.has('pageToken')?1:0;const result=typeof config.recoveryPages==='function'?config.recoveryPages(u,page):(config.recoveryPages?.[page]??{files:[]});return new Response(JSON.stringify(result));}
   if(!u.pathname.startsWith('/drive/v3/files/'))throw Error('UNEXPECTED_SYNTHETIC_ENDPOINT');
   assert.equal(u.searchParams.has('alt'),false,'No content downloads');const id=decodeURIComponent(u.pathname.split('/').at(-1)),file=remote.get(id);
   if(!file||config.getStatus)return new Response('{}',{status:config.getStatus??404});
@@ -364,7 +365,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   const code=[
    "const {useState,useEffect,useRef}=React,attachmentNames=window.attachmentNames,attachmentKinds=['Ostalo'],appNavigation={pending:false},AttachmentViewer=()=>null;",
    "window.firebaseDeps={auth:{currentUser:{uid:'synthetic-owner',email:"+JSON.stringify(/const EMAIL = '([^']+)'/.exec(script)[1])+"}}};",
-   "const service=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-dom',storage:localStorage,metadataStore:{read:async()=>null},getUser:()=>window.firebaseDeps.auth.currentUser,fetch:()=>{throw Error('NETWORK_FORBIDDEN');}});",
+   "const service=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-dom',storage:localStorage,metadataStore:{read:async()=>null,list:async()=>[]},authorize:async()=>({access_token:'synthetic-DOM-token',expires_in:3600,scope:'https://www.googleapis.com/auth/drive.file'}),getUser:()=>window.firebaseDeps.auth.currentUser,fetch:async u=>{if(new URL(u).pathname==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:window.firebaseDeps.auth.currentUser.email}}));if(new URL(u).pathname==='/drive/v3/files')return new Response(JSON.stringify({files:[]}));throw Error('NETWORK_FORBIDDEN');}});",
    "const actualStage=service.stageDraft.bind(service);window.stageTransitions=[];service.stageDraft=args=>new Promise(r=>setTimeout(r,35)).then(()=>actualStage(args)).then(d=>{window.stageTransitions.push(d);return d;});window.service=service;",
    component,
    "function Fixture(){const user=window.firebaseDeps.auth.currentUser,initial={id:'dom-warranty',name:'Product',attachments:"+JSON.stringify([ref(1)])+"};",
@@ -375,7 +376,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
    effect,handler,
    "const changeKind=()=>{},removePending=()=>{},runSavedRemoval=()=>{},changePendingName=(id,value)=>setPending(p=>p.map(a=>a.id===id?{...a,name:value+'.jpg'}:a));",
    'return <><input aria-label="Product name" value={form.name} onChange={e=>setForm({name:e.target.value})}/>{'+parent.trim()+'}</>;}',
-   "service.authChanged(window.firebaseDeps.auth.currentUser).then(()=>{window.domRoot=ReactDOM.createRoot(document.getElementById('root'));window.domRoot.render(<Fixture/>);});"
+   "service.authChanged(window.firebaseDeps.auth.currentUser).then(()=>service.connect()).then(()=>{window.domRoot=ReactDOM.createRoot(document.getElementById('root'));window.domRoot.render(<Fixture/>);});"
   ].join('\n');
   await page.addScriptTag({content:babel.transform(code,{presets:[['react',{runtime:'classic'}]]}).code});
   await page.waitForFunction(()=>window.stageTransitions?.length>0,null,{timeout:5000});
@@ -405,7 +406,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
    const j=JSON.parse(localStorage.getItem(key));j.draft.saveState={version:1,phase:'external'};
    const sha=j.draft.pending[0].sha256,bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('upload:'+d.operationId+':'+sha));
    const job=[...new Uint8Array(bytes)].map(x=>x.toString(16).padStart(2,'0')).join('');
-   j.jobs[job]={id:'synthetic_DOM_upload_retained',state:'uncertain'};localStorage.setItem(key,JSON.stringify(j));window.attachmentService=service;
+   localStorage.setItem(key,JSON.stringify(j));window.attachmentService=service;
   });
   const recovery=html.slice(html.indexOf('        function AbandonedDraftRecovery('),html.indexOf('        function SavedAttachmentRecovery('));
   const discardButton=html.split('\n').find(l=>l.includes('onClick={discard}')&&l.includes('Odbaci nacrt'));
@@ -422,7 +423,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   await page.getByText('Aktivni nacrt je odbacen',{exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>window.service.getDraft('synthetic-owner')),null);
   const archive=page.getByRole('region',{name:'Odbaceni nacrti za oporavak'});
-  assert.equal(await archive.count(),1);await archive.locator('summary').click();assert.ok((await archive.innerText()).includes('synthetic_DOM_upload_retained'));
+  assert.equal(await archive.count(),1);const toggle=archive.getByRole('button',{name:'Prikaži detalje prenosa'});await toggle.focus();await toggle.press('Enter');assert.equal(await archive.getByRole('button',{name:'Sakrij detalje'}).getAttribute('aria-expanded'),'true');assert.ok((await archive.innerText()).includes('dom-operation'));await archive.getByRole('button',{name:'Sakrij detalje'}).click();await archive.getByRole('button',{name:'Proveri prenos',exact:true}).click();await archive.getByText('Nije pronađen fajl dostupan ovoj aplikaciji.',{exact:false}).waitFor();page.once('dialog',d=>d.accept());await archive.getByRole('button',{name:'Zatvori upozorenje i sačuvaj evidenciju',exact:true}).click();await page.waitForFunction(()=>window.service.getAbandonedDrafts('synthetic-owner')[0].closed===true);assert.equal(await archive.count(),0);assert.ok(await page.evaluate(()=>window.service.getAbandonedDrafts('synthetic-owner')[0].closeAudit));
   assert.equal(requests,0);console.log('DOM discard: sealed missing Blob, confirmation, active draft released, same-ID recovery visible, zero network');
 
  }finally{await browser.close();}
@@ -508,3 +509,76 @@ test('unsealed flag cannot erase persistent uncertainty of an earlier commit',as
  const d=h.service.getDraft(h.user.uid);await assert.rejects(h.service.discardDraft(discardArgs(h,d)),/Ishod cuvanja/);assert.ok(h.service.getDraft(h.user.uid));
 });
 
+
+async function recoveryHarness(config={}){
+ const h=await harness({records:new Map(),...config}),picked=await originals();await newDraft(h,picked);
+ editJournal(h,j=>j.draft.saveState={version:1,phase:'external'});
+ await h.service.discardDraft(discardArgs(h,h.service.getDraft(h.user.uid)));
+ return h;
+}
+const recoveryArgs=h=>{const r=h.service.getAbandonedDrafts(h.user.uid)[0];return {userId:h.user.uid,operationId:r.operationId,expected:h.window.garancijeFingerprint(r)};};
+async function foundFile(h,index=0,extra={}){
+ const r=h.service.getAbandonedDrafts(h.user.uid)[0],a=r.pending[index];
+ const key=Buffer.from(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode('upload:'+r.operationId+':'+a.sha256))).toString('hex');
+ return {id:'synthetic_found_'+index,name:a.name,mimeType:a.mime,size:String(a.size),appProperties:{app:'garancije-pro',operation:key,sha256:a.sha256},
+  sha256Checksum:a.sha256,ownedByMe:true,shared:false,permissions:[{type:'user',role:'owner',emailAddress:h.user.email}],trashed:false,...extra};
+}
+test('external/no jobs complete same-client search has limited negative result; audited close preserves active other draft/reupload guard',async()=>{
+ const h=await recoveryHarness({recoveryPages:[{files:[]}]});
+ const other=await h.service.stageDraft({userId:h.user.uid,base:null,metadata:{name:'Other'},attachments:[],pending:[],operationId:'other-active',expectedRevision:h.service.contentRevision(null)});
+ const r=await h.service.checkAbandonedTransfer(recoveryArgs(h));assert.equal(r.status,'no_accessible_files');assert.equal(r.complete,true);
+ assert.ok(h.calls.filter(c=>new URL(c.url).pathname==='/drive/v3/files').every(c=>!new URL(c.url).searchParams.get('q').includes('trashed')&&!new URL(c.url).searchParams.get('q').includes('parents')));
+ await h.service.closeAbandonedTransfer(recoveryArgs(h));const a=h.service.getAbandonedDrafts(h.user.uid)[0];assert.equal(a.closed,true);assert.ok(a.closeAudit);assert.equal(a.pending.length,2);assert.equal(h.service.getDraft(h.user.uid).operationId,other.operationId);
+ const reload=await harness({storage:h.storage,records:h.records,remote:h.remote});assert.equal(reload.service.getAbandonedDrafts(reload.user.uid)[0].closed,true);
+ assert.equal(h.writes.length,0);assert.equal(h.patches().length,0);
+});
+test('confirmed commit stays untouched and close stores audit without copying warranty body',async()=>{
+ const h=await recoveryHarness({recoveryPages:[{files:[]}]}),a=h.service.getAbandonedDrafts(h.user.uid)[0];
+ h.records.set(a.id,{name:'Saved',lastOperation:a.operationId,attachmentCount:0,attachmentNames:[],attachments:[]});const before=clone(h.records.get(a.id));
+ assert.equal((await h.service.checkAbandonedTransfer(recoveryArgs(h))).status,'confirmed_commit');
+ await h.service.closeAbandonedTransfer(recoveryArgs(h));assert.deepEqual(h.records.get(a.id),before);assert.equal(h.writes.length,0);
+ assert.match(h.service.getAbandonedDrafts(h.user.uid)[0].check.serverFingerprint,/^[a-f0-9]{64}$/);
+});
+test('unknown IDs search finds moved/trashed multiple matches on all pages with references',async()=>{
+ const h=await recoveryHarness();const f=await foundFile(h),g={...f,id:'second_match',trashed:true,parents:['moved-folder']};
+ h.config.recoveryPages=(u,page)=>u.searchParams.get('q').includes(f.appProperties.operation)?[{files:[f],nextPageToken:'page2'},{files:[g]}][page]:{files:[]};h.records.set('reference-warranty',{attachments:[{driveFileId:g.id}]});
+ const r=await h.service.checkAbandonedTransfer(recoveryArgs(h));assert.equal(r.status,'files_found');assert.equal(r.files.length,2);assert.equal(r.files[1].trashed,true);assert.deepEqual(clone(r.files[1].references),['reference-warranty']);assert.equal(h.patches().length,0);
+});
+test('known ID is read directly and must match same operation identity',async()=>{
+ const h=await recoveryHarness(),f=await foundFile(h);h.remote.set(f.id,f);h.config.recoveryPages=[{files:[]}];
+ editJournal(h,j=>{const a=Object.values(j.abandonedDrafts)[0];a.jobs[f.appProperties.operation]={id:f.id,state:'confirmed'};});
+ const r=await h.service.checkAbandonedTransfer(recoveryArgs(h));assert.equal(r.files[0].id,f.id);assert.ok(h.calls.some(c=>new URL(c.url).pathname.endsWith('/'+f.id)));
+});
+for(const mode of ['403','offline','incomplete','malformed','identity','repeat-page','known404'])test('recovery '+mode+' blocks close and invalidates previous successful finding',async()=>{
+ const h=await recoveryHarness({recoveryPages:[{files:[]}]});await h.service.checkAbandonedTransfer(recoveryArgs(h));
+ if(mode==='403')h.config.recoveryStatus=403;
+ if(mode==='offline')h.config.recoveryOffline=true;
+ if(mode==='incomplete')h.config.recoveryPages=[{files:[],incompleteSearch:true}];
+ if(mode==='malformed')h.config.recoveryPages=[{}];
+ if(mode==='identity')h.config.recoveryPages=[{files:[await foundFile(h,0,{ownedByMe:false})]}];
+ if(mode==='repeat-page')h.config.recoveryPages=[{files:[],nextPageToken:'page2'},{files:[],nextPageToken:'page2'}];
+ if(mode==='known404'){const f=await foundFile(h);editJournal(h,j=>{const a=Object.values(j.abandonedDrafts)[0];a.jobs[f.appProperties.operation]={id:'missing-id',state:'uncertain'};});}
+ await assert.rejects(h.service.checkAbandonedTransfer(recoveryArgs(h)));await assert.rejects(h.service.closeAbandonedTransfer(recoveryArgs(h)));assert.notEqual(h.service.getAbandonedDrafts(h.user.uid)[0].closed,true);
+});
+test('account/archive/other draft revision change during search blocks completion',async()=>{
+ for(const mode of ['owner','archive','draft']){
+  const h=await recoveryHarness({recoveryPages:[{files:[]}]});
+  h.config.onRecovery=()=>{if(mode==='owner')h.window.firebaseDeps.auth.currentUser={uid:'other'};else editJournal(h,j=>{if(mode==='archive')Object.values(j.abandonedDrafts)[0].revision++;else j.draft={id:'other',operationId:'other',revision:1};});};
+  await assert.rejects(h.service.checkAbandonedTransfer(recoveryArgs(h)));if(mode==='owner')h.window.firebaseDeps.auth.currentUser=h.user;assert.notEqual(h.service.getAbandonedDrafts(h.user.uid)[0].closed,true);
+ }
+});
+for(const mode of ['write','readback','clear'])test('audit '+mode+' failure retains visible original identities',async()=>{
+ const h=await recoveryHarness({recoveryPages:[{files:[]}]});await h.service.checkAbandonedTransfer(recoveryArgs(h));const args=recoveryArgs(h);
+ if(mode==='write')h.storage.fail=1;
+ if(mode==='clear'){const set=h.storage.setItem.bind(h.storage);let n=0;h.storage.setItem=(k,v)=>{if(++n===2)throw Error('SYNTHETIC_CLOSE_FAIL');set(k,v);};}
+ if(mode==='readback'){const get=h.storage.getItem.bind(h.storage);h.storage.getItem=k=>{const raw=get(k);if(!raw)return raw;const j=JSON.parse(raw);for(const a of Object.values(j.abandonedDrafts||{}))delete a.closeAudit;return JSON.stringify(j);};}
+ await assert.rejects(h.service.closeAbandonedTransfer(args));const a=h.service.getAbandonedDrafts(h.user.uid)[0];assert.notEqual(a.closed,true);assert.equal(a.pending.length,2);
+});
+test('double check/close cannot overwrite newer archive; closed uncertain uploads remain guarded',async()=>{
+ const h=await recoveryHarness({uploads:true,recoveryPages:[{files:[]}]}),args=recoveryArgs(h);
+ const rs=await Promise.allSettled([h.service.checkAbandonedTransfer(args),h.service.checkAbandonedTransfer(args)]);assert.equal(rs.filter(r=>r.status==='fulfilled').length,1);
+ const ca=recoveryArgs(h);const cs=await Promise.allSettled([h.service.closeAbandonedTransfer(ca),h.service.closeAbandonedTransfer(ca)]);assert.equal(cs.filter(r=>r.status==='fulfilled').length,1);
+ const archived=h.service.getAbandonedDrafts(h.user.uid)[0],d=await h.service.stageDraft({userId:h.user.uid,base:null,metadata:{name:'New'},attachments:[],pending:archived.pending,operationId:'new-after-close',expectedRevision:h.service.contentRevision(null),seal:true});
+ await assert.rejects(h.service.saveWarranty(saveArgs(h,d)),/Drive veza|prvo|nerazresenom|SYNTHETIC|UNEXPECTED/i);
+ assert.equal(h.remote.size,0);assert.equal(h.writes.length,0);
+});
