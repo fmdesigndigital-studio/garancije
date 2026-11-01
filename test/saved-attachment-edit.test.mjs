@@ -41,15 +41,34 @@ async function harness(config={}){
   }};window.firebaseDeps=d;
  const context=vm.createContext({window,navigator,crypto:webcrypto,URL,Blob,Response,Headers,AbortController,DOMException,TextEncoder,TextDecoder,structuredClone,
   console:{log(){}},setTimeout(fn,ms){const t=setTimeout(fn,ms);t.unref?.();return t;},clearTimeout});
- vm.runInContext(script,context);user.email=/const EMAIL = '([^']+)'/.exec(script)[1];
+ vm.runInContext(config.legacyNullBug?script.replace('const existing=record?._attachmentEdit;','const existing=record._attachmentEdit;'):script,context);user.email=/const EMAIL = '([^']+)'/.exec(script)[1];
  const products=/products:\s*'([^']+)'/.exec(script)[1],scope=/const SCOPE = '([^']+)'/.exec(script)[1],remote=config.remote??new Map();
  if(!config.remote)for(const value of records.values())for(const a of value.attachments||[])if(a.driveFileId&&!remote.has(a.driveFileId))remote.set(a.driveFileId,
   {id:a.driveFileId,name:a.name,mimeType:a.mime,size:String(a.size),sha256Checksum:a.sha256,parents:[products],ownedByMe:true,shared:false,
    permissions:[{type:'user',role:'owner',emailAddress:user.email}],capabilities:{canRename:true,canTrash:true},
    appProperties:{app:'garancije-pro',operation:'b'.repeat(64),sha256:a.sha256},trashed:false,v:1});
+ const folders=vm.runInContext('('+/const DRIVE_FOLDERS = (\{[^;]+\});/.exec(script)[1]+')',context);
+ const uploads=new Map();let generated=0;
  const send=async(url,init={})=>{
   calls.push({url,method:init.method??'GET',body:init.body,headers:init.headers});const u=new URL(url);
   if(u.pathname==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:user.email}}),{status:200});
+  if(config.uploads){
+   if(u.pathname==='/drive/v3/files/generateIds')return new Response(JSON.stringify({ids:['synthetic_upload_'+(++generated)]}));
+   if(u.pathname==='/upload/drive/v3/files'){
+    assert.equal(init.method,'POST');const meta=JSON.parse(init.body);assert.ok(!remote.has(meta.id));uploads.set(meta.id,meta);
+    return new Response('',{headers:{Location:'https://www.googleapis.com/upload/drive/v3/files/synthetic/'+meta.id}});
+   }
+   if(u.pathname.startsWith('/upload/drive/v3/files/synthetic/')){
+    assert.equal(init.method,'PUT');assert.ok(init.body instanceof Blob);const meta=uploads.get(u.pathname.split('/').at(-1));assert.ok(meta);
+    const hash=Buffer.from(await webcrypto.subtle.digest('SHA-256',await init.body.arrayBuffer())).toString('hex');assert.equal(hash,meta.appProperties.sha256);
+    remote.set(meta.id,{...meta,size:String(init.body.size),sha256Checksum:hash,ownedByMe:true,shared:false,
+     permissions:[{type:'user',role:'owner',emailAddress:user.email}],trashed:false,v:1});return new Response('{}');
+   }
+   const folderId=u.pathname.split('/').at(-1),kind=Object.keys(folders).find(k=>folders[k]===folderId);
+   if(kind)return new Response(JSON.stringify({id:folderId,name:{root:'baza-garancije-i-racuni',products:'proizvodi',backups:'rezervne-kopije'}[kind],
+    mimeType:'application/vnd.google-apps.folder',parents:kind==='root'?[]:[folders.root],ownedByMe:true,trashed:false,
+    permissions:[{type:'user',role:'owner',emailAddress:user.email}]}));
+  }
   if(!u.pathname.startsWith('/drive/v3/files/'))throw Error('UNEXPECTED_SYNTHETIC_ENDPOINT');
   assert.equal(u.searchParams.has('alt'),false,'No content downloads');const id=decodeURIComponent(u.pathname.split('/').at(-1)),file=remote.get(id);
   if(!file||config.getStatus)return new Response('{}',{status:config.getStatus??404});
@@ -260,4 +279,67 @@ test('double Save after staged rename cannot issue a second Drive mutation',asyn
  const args={userId:h.user.uid,operationId:d.operationId,expectedRevision:d.revision};
  const result=await Promise.allSettled([h.service.saveWarranty(args),h.service.saveWarranty(args)]);
  assert.equal(result.filter(r=>r.status==='fulfilled').length,1);assert.equal(h.patches().length,1);
+});
+
+async function newDraft(h,pending=[]){
+ return h.service.stageDraft({userId:h.user.uid,base:null,metadata:{name:'Synthetic new warranty',purchaseDate:'2026-11-01',baseMonths:12},
+  attachments:[],pending,operationId:'synthetic-new-operation',expectedRevision:h.service.contentRevision(h.service.getDraft(h.user.uid)),seal:true});
+}
+async function originals(){
+ return Promise.all(['GP-proba-preimenovanje.jpg','GP-proba-uklanjanje.jpg'].map(async(name,i)=>{
+  const original=new Blob(['SYNTHETIC_IMAGE_BYTES_'+i],{type:'image/jpeg'});
+  const sha256=Buffer.from(await webcrypto.subtle.digest('SHA-256',await original.arrayBuffer())).toString('hex');
+  return {id:'new-pending-'+i,name,mime:original.type,size:original.size,sha256,original};
+ }));
+}
+const saveArgs=(h,d,newAttachments=[])=>({userId:h.user.uid,operationId:d.operationId,expectedRevision:d.revision,newAttachments});
+test('real saveWarranty creates a new warranty without attachments and without Drive calls',async()=>{
+ const h=await harness({records:new Map()}),d=await newDraft(h);
+ assert.equal(d.edit,false);assert.equal(d.expected,'null');
+ const result=await h.service.saveWarranty(saveArgs(h,d));
+ assert.equal(result.length,0);assert.equal(h.records.size,1);assert.equal(h.records.get(d.id).attachmentCount,0);
+ assert.deepEqual(h.records.get(d.id).attachmentNames,[]);assert.equal(h.calls.length,0);assert.equal(h.writes.length,1);
+ assert.equal(h.service.getDraft(h.user.uid),null);
+});
+test('real saveWarranty creates a new warranty with two pending originals exactly once',async()=>{
+ const h=await harness({records:new Map(),uploads:true}),picked=await originals(),d=await newDraft(h,picked);
+ const result=await h.service.saveWarranty(saveArgs(h,d,picked));
+ assert.equal(result.length,2);assert.equal(h.records.size,1);assert.equal(h.remote.size,2);
+ assert.equal(h.records.get(d.id).attachmentCount,2);assert.deepEqual(h.records.get(d.id).attachmentNames,picked.map(x=>x.name));
+ assert.equal(h.calls.filter(x=>x.method==='PUT').length,2);assert.equal(h.patches().length,0);assert.equal(h.writes.length,1);
+ for(const r of result)assert.equal(h.remote.get(r.driveFileId).appProperties.sha256,r.sha256);
+});
+test('reload resumes exact sealed draft/operation after reproduced old null failure before any upload',async()=>{
+ const old=await harness({records:new Map(),uploads:true,legacyNullBug:true}),picked=await originals(),d=await newDraft(old,picked);
+ await assert.rejects(old.service.saveWarranty(saveArgs(old,d,picked)),/Cannot read properties of null/);
+ assert.equal(old.calls.length,0);assert.equal(old.writes.length,0);
+ const next=await harness({storage:old.storage,records:old.records,remote:old.remote,uploads:true}),restored=next.service.getDraft(next.user.uid);
+ assert.equal(restored.sealed,true);assert.equal(restored.operationId,d.operationId);assert.equal(restored.id,d.id);
+ assert.equal(restored.revision,d.revision);assert.equal(restored.expected,'null');assert.ok(restored.pending.every(x=>!x.original));
+ await assert.rejects(next.service.saveWarranty(saveArgs(next,restored)),/Ponovo izaberite original/);
+ assert.equal(next.remote.size,0);assert.equal(next.writes.length,0);
+ const wrong=await originals();wrong[0]={...wrong[0],original:new Blob(['WRONG'],{type:'image/jpeg'})};
+ await assert.rejects(next.service.saveWarranty(saveArgs(next,restored,wrong)),/Hash mora odgovarati/);
+ assert.equal(next.remote.size,0);assert.equal(next.writes.length,0);
+ assert.throws(()=>next.window.attachmentNames.reselect(restored.pending[0],{...picked[0],sha256:'f'.repeat(64)}),/ne odgovara/);
+ const reselected=restored.pending.map((saved,i)=>next.window.attachmentNames.reselect(saved,picked[i]));
+ await next.service.saveWarranty(saveArgs(next,restored,reselected));
+ assert.equal(next.records.size,1);assert.equal(next.records.get(d.id).lastOperation,d.operationId);assert.equal(next.remote.size,2);
+ assert.equal(next.service.getDraft(next.user.uid),null);
+});
+test('new save retry after committed response loss uses same record and never uploads twice',async()=>{
+ const h=await harness({records:new Map(),uploads:true,loseRenameCommit:true}),picked=await originals(),d=await newDraft(h,picked);
+ await assert.rejects(h.service.saveWarranty(saveArgs(h,d,picked)),/SYNTHETIC_SAVE_RESPONSE_LOST/);
+ assert.equal(h.records.get(d.id).lastOperation,d.operationId);assert.equal(h.remote.size,2);
+ const next=await harness({storage:h.storage,records:h.records,remote:h.remote,uploads:true}),restored=next.service.getDraft(next.user.uid);
+ await next.service.saveWarranty(saveArgs(next,restored));assert.equal(next.calls.length,0);assert.equal(next.writes.length,0);
+ assert.equal(next.records.size,1);assert.equal(next.remote.size,2);assert.equal(next.service.getDraft(next.user.uid),null);
+ await assert.rejects(next.service.saveWarranty(saveArgs(next,restored)),/Nema sačuvanog nacrta/);
+});
+test('stale draft for deleted existing warranty cannot recreate it or upload pending originals',async()=>{
+ const h=await harness({uploads:true}),picked=await originals(),d=await h.stage({pending:picked,seal:true});
+ h.records.delete('warranty-one');
+ await assert.rejects(h.service.saveWarranty(saveArgs(h,d,picked)),/međuvremenu promenjen/);
+ assert.equal(h.records.size,0);assert.equal(h.writes.length,0);assert.equal(h.calls.length,0);
+ assert.equal(h.service.getDraft(h.user.uid).operationId,d.operationId);
 });

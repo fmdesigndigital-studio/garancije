@@ -1104,7 +1104,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             notify();return {record,draft,removed:true};
         };
         const runSavedRename=async(uid,d,record,current)=>{
-            const existing=record._attachmentEdit;
+            const existing=record?._attachmentEdit;
             const base=existing?savedHelper.withoutEdit(record):record;
             const targets=savedHelper.renameTargets(base,d.attachments);
             if(!targets.length&&!existing)return record;
@@ -2122,7 +2122,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.01.1';
+        const RELEASE_VERSION = '2026.11.01.2';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
