@@ -364,7 +364,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   const code=[
    "const {useState,useEffect,useRef}=React,attachmentNames=window.attachmentNames,attachmentKinds=['Ostalo'],appNavigation={pending:false},AttachmentViewer=()=>null;",
    "window.firebaseDeps={auth:{currentUser:{uid:'synthetic-owner',email:"+JSON.stringify(/const EMAIL = '([^']+)'/.exec(script)[1])+"}}};",
-   "const service=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-dom',storage:localStorage,getUser:()=>window.firebaseDeps.auth.currentUser,fetch:()=>{throw Error('NETWORK_FORBIDDEN');}});",
+   "const service=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-dom',storage:localStorage,metadataStore:{read:async()=>null},getUser:()=>window.firebaseDeps.auth.currentUser,fetch:()=>{throw Error('NETWORK_FORBIDDEN');}});",
    "const actualStage=service.stageDraft.bind(service);window.stageTransitions=[];service.stageDraft=args=>new Promise(r=>setTimeout(r,35)).then(()=>actualStage(args)).then(d=>{window.stageTransitions.push(d);return d;});window.service=service;",
    component,
    "function Fixture(){const user=window.firebaseDeps.auth.currentUser,initial={id:'dom-warranty',name:'Product',attachments:"+JSON.stringify([ref(1)])+"};",
@@ -375,7 +375,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
    effect,handler,
    "const changeKind=()=>{},removePending=()=>{},runSavedRemoval=()=>{},changePendingName=(id,value)=>setPending(p=>p.map(a=>a.id===id?{...a,name:value+'.jpg'}:a));",
    'return <><input aria-label="Product name" value={form.name} onChange={e=>setForm({name:e.target.value})}/>{'+parent.trim()+'}</>;}',
-   "service.authChanged(window.firebaseDeps.auth.currentUser).then(()=>ReactDOM.createRoot(document.getElementById('root')).render(<Fixture/>));"
+   "service.authChanged(window.firebaseDeps.auth.currentUser).then(()=>{window.domRoot=ReactDOM.createRoot(document.getElementById('root'));window.domRoot.render(<Fixture/>);});"
   ].join('\n');
   await page.addScriptTag({content:babel.transform(code,{presets:[['react',{runtime:'classic'}]]}).code});
   await page.waitForFunction(()=>window.stageTransitions?.length>0,null,{timeout:5000});
@@ -397,6 +397,114 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   await page.evaluate(()=>window.setSafety(false));assert.equal(await saved.isDisabled(),false);
   assert.equal(await page.evaluate(()=>window.fixtureError),undefined);assert.equal(requests,0);
   console.log('DOM: stable node/focus/caret; typing/delete/paste/composition; pending/product; latest actual stageDraft; Save lock; zero network');
+
+  await page.evaluate(async()=>{
+   const service=window.service,d=service.getDraft('synthetic-owner');
+   await service.stageDraft({userId:'synthetic-owner',id:d.id,base:JSON.parse(d.expected),metadata:d.metadata,attachments:d.attachments,pending:d.pending,operationId:d.operationId,expectedRevision:d.revision,seal:true});
+   const key=Object.keys(localStorage).find(k=>k.startsWith('garancije-drive-integration-v1:isolated-dom:'));
+   const j=JSON.parse(localStorage.getItem(key));j.draft.saveState={version:1,phase:'external'};
+   const sha=j.draft.pending[0].sha256,bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('upload:'+d.operationId+':'+sha));
+   const job=[...new Uint8Array(bytes)].map(x=>x.toString(16).padStart(2,'0')).join('');
+   j.jobs[job]={id:'synthetic_DOM_upload_retained',state:'uncertain'};localStorage.setItem(key,JSON.stringify(j));window.attachmentService=service;
+  });
+  const recovery=html.slice(html.indexOf('        function AbandonedDraftRecovery('),html.indexOf('        function SavedAttachmentRecovery('));
+  const discardButton=html.split('\n').find(l=>l.includes('onClick={discard}')&&l.includes('Odbaci nacrt'));
+  const discardFixture=[
+   recovery,
+   "function DiscardFixture(){const [done,setDone]=useState(false),[failure,setFailure]=useState('');const saving=false,processing=false,staging=false,removing=false,discarding=false,sealed=true;",
+   "const discard=async()=>{if(!confirm('Odbaci aktivni nacrt? Sacuvana garancija i Drive fajlovi ostaju.'))return;try{const d=service.getDraft('synthetic-owner');await service.discardDraft({userId:'synthetic-owner',id:d.id,operationId:d.operationId,expected:window.garancijeFingerprint(d),expectedRevision:d.revision});setDone(true);}catch(e){setFailure(e.message);}};",
+   'return <>{done?<p>Aktivni nacrt je odbacen</p>:<>'+discardButton+'</>}<p role="alert">{failure}</p><AbandonedDraftRecovery user={window.firebaseDeps.auth.currentUser}/></>;}',
+   'window.domRoot.render(<DiscardFixture/>);'
+  ].join('\n');
+  await page.addScriptTag({content:babel.transform(discardFixture,{presets:[['react',{runtime:'classic'}]]}).code});
+  const discardControl=page.getByRole('button',{name:'Odbaci nacrt',exact:true});assert.equal(await discardControl.isEnabled(),true);
+  page.once('dialog',d=>d.accept());await discardControl.click();
+  await page.getByText('Aktivni nacrt je odbacen',{exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>window.service.getDraft('synthetic-owner')),null);
+  const archive=page.getByRole('region',{name:'Odbaceni nacrti za oporavak'});
+  assert.equal(await archive.count(),1);await archive.locator('summary').click();assert.ok((await archive.innerText()).includes('synthetic_DOM_upload_retained'));
+  assert.equal(requests,0);console.log('DOM discard: sealed missing Blob, confirmation, active draft released, same-ID recovery visible, zero network');
+
  }finally{await browser.close();}
+});
+
+
+
+const discardArgs=(h,d)=>({userId:h.user.uid,id:d.id,operationId:d.operationId,expected:h.window.garancijeFingerprint(d),expectedRevision:d.revision});
+function editJournal(h,fn){const entry=[...h.storage.data.entries()].find(([k])=>k.startsWith('garancije-drive-integration-v1:'));const j=JSON.parse(entry[1]);fn(j);h.storage.data.set(entry[0],JSON.stringify(j));return entry[0];}
+test('discard without Blobs preserves existing warranty/count/names and makes zero Drive writes',async()=>{
+ const h=await harness();await h.stage({pending:[{id:'p',name:'Missing.jpg',mime:'image/jpeg',sha256:'c'.repeat(64),size:5}]});
+ const before=clone(h.records.get('warranty-one')),d=h.service.getDraft(h.user.uid);
+ await h.service.discardDraft(discardArgs(h,d));assert.equal(h.service.getDraft(h.user.uid),null);assert.deepEqual(h.records.get('warranty-one'),before);assert.equal(h.calls.length,0);assert.equal(h.writes.length,0);
+});
+test('sealed preflight can discard after authoritative absence without originals',async()=>{
+ const h=await harness({records:new Map()}),d=await newDraft(h,[{id:'p',name:'Missing.jpg',mime:'image/jpeg',sha256:'c'.repeat(64),size:5}]);
+ const result=await h.service.discardDraft(discardArgs(h,d));assert.equal(result.recoveryRetained,false);assert.equal(h.service.getDraft(h.user.uid),null);assert.equal(h.calls.length,0);
+});
+test('confirmed commit discards only local draft and preserves saved count/names',async()=>{
+ const h=await harness({records:new Map(),uploads:true,loseRenameCommit:true}),picked=await originals(),d=await newDraft(h,picked);
+ await assert.rejects(h.service.saveWarranty(saveArgs(h,d,picked)));const before=clone(h.records.get(d.id)),live=h.service.getDraft(h.user.uid),calls=h.calls.length;
+ const r=await h.service.discardDraft(discardArgs(h,live));assert.equal(r.committed,true);assert.equal(h.service.getDraft(h.user.uid),null);
+ assert.deepEqual(h.records.get(d.id),before);assert.equal(h.calls.length,calls);assert.equal(h.remote.size,2);
+});
+for(const state of ['reserved','uncertain','confirmed'])test('discard archives '+state+' same IDs before clear, survives reload and forbids replay/duplicate upload',async()=>{
+ const h=await harness({records:new Map(),uploads:true}),picked=await originals(),d=await newDraft(h,picked);
+ const key=Buffer.from(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode('upload:'+d.operationId+':'+picked[0].sha256))).toString('hex');
+ editJournal(h,j=>{j.jobs[key]={id:'synthetic_retained_upload',state};j.draft.saveState={version:1,phase:'external'};});
+ const live=h.service.getDraft(h.user.uid),r=await h.service.discardDraft(discardArgs(h,live));assert.equal(r.recoveryRetained,true);assert.equal(h.calls.length,0);assert.equal(h.writes.length,0);
+ const next=await harness({storage:h.storage,records:h.records,remote:h.remote,uploads:true});assert.equal(next.service.getDraft(next.user.uid),null);
+ const archives=next.service.getAbandonedDrafts(next.user.uid);assert.equal(archives.length,1);assert.equal(archives[0].operationId,d.operationId);
+ assert.equal(archives[0].jobs[key].id,'synthetic_retained_upload');assert.equal(archives[0].jobs[key].state,state);
+ await assert.rejects(next.service.stageDraft({userId:next.user.uid,base:null,metadata:{name:'No replay'},attachments:[],pending:[],operationId:d.operationId}));
+ const nd=await next.service.stageDraft({userId:next.user.uid,base:null,metadata:{name:'Different draft'},attachments:[],pending:picked,operationId:'different-operation',expectedRevision:next.service.contentRevision(null),seal:true});
+ await assert.rejects(next.service.saveWarranty(saveArgs(next,nd,picked)),/nerazresenom prenosu/);assert.equal(next.remote.size,0);assert.equal(next.calls.filter(x=>x.method==='PUT').length,0);
+});
+for(const phase of ['commit','unknown'])test('unconfirmed '+phase+' phase cannot be discarded or silently archived',async()=>{
+ const h=await harness({records:new Map()}),d=await newDraft(h);editJournal(h,j=>j.draft.saveState={version:1,phase});
+ const live=h.service.getDraft(h.user.uid);await assert.rejects(h.service.discardDraft(discardArgs(h,live)),/Ishod cuvanja/);assert.ok(h.service.getDraft(h.user.uid));assert.equal(h.service.getAbandonedDrafts(h.user.uid).length,0);
+});
+for(const error of ['403','404','OFFLINE'])test('server '+error+' keeps sealed draft and recovery unchanged',async()=>{
+ const h=await harness({records:new Map()}),d=await newDraft(h);
+ h.window.driveEnvironment.metadataStore.read=async()=>{throw Error(error);};
+ await assert.rejects(h.service.discardDraft(discardArgs(h,d)),new RegExp(error));assert.ok(h.service.getDraft(h.user.uid));assert.equal(h.service.getAbandonedDrafts(h.user.uid).length,0);
+});
+for(const kind of ['rename','remove'])test('active server '+kind+' blocks discard',async()=>{
+ const h=await harness(),d=await h.stage({seal:true});h.records.get(d.id)._attachmentEdit={kind};
+ await assert.rejects(h.service.discardDraft(discardArgs(h,d)));assert.ok(h.service.getDraft(h.user.uid));assert.equal(h.writes.length,0);
+});
+test('owner/revision changes during server reconciliation keep original draft',async()=>{
+ for(const mode of ['owner','revision']){
+  const h=await harness(),d=await h.stage({seal:true}),read=h.window.driveEnvironment.metadataStore.read;
+  h.window.driveEnvironment.metadataStore.read=async(...args)=>{const r=await read(...args);if(mode==='owner')h.window.firebaseDeps.auth.currentUser={uid:'other'};else editJournal(h,j=>j.draft.revision++);return r;};
+  await assert.rejects(h.service.discardDraft(discardArgs(h,d)));if(mode==='owner')h.window.firebaseDeps.auth.currentUser=h.user;assert.ok(h.service.getDraft(h.user.uid));
+ }
+});
+for(const failure of ['archive-write','archive-readback','clear-write'])test('discard '+failure+' failure keeps active original and never loses upload identity',async()=>{
+ const h=await harness({records:new Map()}),picked=await originals();await newDraft(h,picked);
+ editJournal(h,j=>{j.draft.saveState={version:1,phase:'external'};});const d=h.service.getDraft(h.user.uid);
+ if(failure==='archive-write')h.storage.fail=1;
+ if(failure==='clear-write'){const set=h.storage.setItem.bind(h.storage);let n=0;h.storage.setItem=(k,v)=>{if(++n===2)throw Error('SYNTHETIC_CLEAR_FAILED');set(k,v);};}
+ if(failure==='archive-readback'){const get=h.storage.getItem.bind(h.storage);h.storage.getItem=k=>{const raw=get(k);if(!raw)return raw;const j=JSON.parse(raw);if(j.abandonedDrafts)delete j.abandonedDrafts;return JSON.stringify(j);};}
+ await assert.rejects(h.service.discardDraft(discardArgs(h,d)));assert.equal(h.service.getDraft(h.user.uid).operationId,d.operationId);assert.equal(h.calls.length,0);assert.equal(h.writes.length,0);
+});
+test('double discard clears once and next new draft is not blocked by abandoned active operation',async()=>{
+ const h=await harness({records:new Map()}),d=await newDraft(h),args=discardArgs(h,d);
+ const result=await Promise.allSettled([h.service.discardDraft(args),h.service.discardDraft(args)]);assert.equal(result.filter(x=>x.status==='fulfilled').length,1);
+ const next=await h.service.stageDraft({userId:h.user.uid,base:null,metadata:{name:'New'},attachments:[],pending:[],operationId:'fresh-operation',expectedRevision:h.service.contentRevision(null)});
+ assert.equal(next.operationId,'fresh-operation');await assert.rejects(h.service.saveWarranty(saveArgs(h,d)));
+});
+
+
+test('active SDK commit lease blocks discard before server read or local clearing',async()=>{
+ const h=await harness({records:new Map()}),d=await newDraft(h);
+ const ns=[...h.storage.data.keys()].find(k=>k.startsWith('garancije-drive-integration-v1:'));
+ let release;const held=new Promise(r=>release=r);
+ const running=h.context.navigator.locks.request(ns+':commit:'+JSON.stringify([h.user.uid,d.operationId]),async()=>held);
+ try{await assert.rejects(h.service.discardDraft(discardArgs(h,d)),e=>e.code==='COMMIT_PENDING');assert.ok(h.service.getDraft(h.user.uid));}
+ finally{release();await running;}
+});
+test('unsealed flag cannot erase persistent uncertainty of an earlier commit',async()=>{
+ const h=await harness({records:new Map()});await newDraft(h);editJournal(h,j=>{j.draft.sealed=false;j.draft.saveState={version:1,phase:'commit'};});
+ const d=h.service.getDraft(h.user.uid);await assert.rejects(h.service.discardDraft(discardArgs(h,d)),/Ishod cuvanja/);assert.ok(h.service.getDraft(h.user.uid));
 });
 

@@ -1364,23 +1364,53 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             async retryDocumentPhotoCleanup({userId,operationId,attachmentId}) {
                 return lock(async()=>{assertUser(userId);return attachmentId?finishAttachmentCleanup(userId,operationId,attachmentId):finishPhotoCleanup(userId,operationId);});
             },
+            getAbandonedDrafts(userId) {
+                assertUser(userId);return Object.values(journal().abandonedDrafts||{}).filter(x=>x?.userId===userId).map(x=>structuredClone(x));
+            },
             async discardDraft({userId,id,operationId,expected,expectedRevision}) {
                 assertUser(userId);
-                return lock(async () => {
-                    assertUser(userId);
-                    const discarded=journal().draft;
-                    mutateJournal(j => {
-                        const d = j.draft;
-                        if (!d || d.id !== id || d.operationId !== operationId || canonical(d) !== expected) throw new Error('Nacrt se promenio. Odbacivanje je zaustavljeno.');
-                        checkDraftRevision(d,expectedRevision);
-                        if (d.sealed||d.attachmentEditPending||savedIntent(d.id)) throw new Error('Zapoceto cuvanje ili izmena priloga mora prvo da se razresi. Nacrt nije odbacen.');
-                        queuePhotoCleanup(j,userId,d,'discard');
-                        j.discardedDrafts = { ...j.discardedDrafts, [operationId]: true };
-                        j.draft = null;
+                return lock(()=>navigator.locks.request(namespace+':commit:'+commitKey(userId,operationId),{ifAvailable:true},async lease=>{
+                    if(!lease||pendingCommits.get(commitKey(userId,operationId))?.pending)throw commitPending();
+                    const d=journal().draft;
+                    const check=()=>{
+                        assertUser(userId);const live=journal().draft;
+                        if(!d||d.id!==id||d.operationId!==operationId||canonical(d)!==expected||canonical(live)!==canonical(d))throw staleDraft();
+                        checkDraftRevision(live,expectedRevision);
+                        if(d.attachmentEditPending||savedIntent(d.id))throw savedUncertain();
+                        return true;
+                    };
+                    check();
+                    const current=await readMetadata(id,userId,check);check();
+                    if(current?._attachmentEdit||current?._attachmentDeletion)throw savedUncertain();
+                    const committed=current?.lastOperation===operationId;
+                    if(!committed&&((d.sealed&&!d.saveState)||(d.saveState&&(d.saveState.version!==1||!['preflight','external'].includes(d.saveState.phase)))))
+                        throw Error('Ishod cuvanja nije potvrdjen. Nacrt nije odbacen; prvo razresite istu operaciju.');
+                    const jobs={};
+                    for(const a of d.pending){
+                        const key=await hashText('upload:'+operationId+':'+a.sha256);check();
+                        const job=journal().jobs[key];
+                        if(job){if(typeof job.id!=='string'||!job.id||!['reserved','uncertain','confirmed'].includes(job.state))throw Error('Dnevnik prenosa nije podrzan. Nacrt je ocuvan.');jobs[key]={...job,attachmentId:a.id,name:a.name,sha256:a.sha256,size:a.size,mime:a.mime};}
+                    }
+                    const unresolved=!committed&&(Object.keys(jobs).length>0||d.saveState?.phase==='external');
+                    const archive={version:1,userId,id,operationId,revision:d.revision,status:'uploads_unresolved',name:d.metadata?.name||'Nacrt',pending:d.pending,jobs};
+                    if(unresolved){
+                        check();mutateJournal(j=>{
+                            if(j.abandonedDrafts?.[operationId]&&canonical(j.abandonedDrafts[operationId])!==canonical(archive))throw staleDraft();
+                            j.abandonedDrafts={...j.abandonedDrafts,[operationId]:archive};
+                        });
+                        check();
+                        if(canonical(journal().abandonedDrafts?.[operationId])!==canonical(archive))throw Error('Evidencija oporavka nije potvrdjena. Aktivan nacrt je ocuvan.');
+                    }
+                    check();mutateJournal(j=>{
+                        if(canonical(j.draft)!==canonical(d))throw staleDraft();
+                        if(unresolved&&canonical(j.abandonedDrafts?.[operationId])!==canonical(archive))throw Error('Evidencija oporavka nije potvrdjena.');
+                        if(!unresolved)queuePhotoCleanup(j,userId,d,committed?'saved':'discard');
+                        j.discardedDrafts={...j.discardedDrafts,[operationId]:true};j.draft=null;
                     });
-                    notify();
-                    if(hasPhotos(userId,discarded))try { await finishPhotoCleanup(userId,operationId); } catch { return {localCopyRetained:true}; }
-                });
+                    notify();let localCopyRetained=false;
+                    if(!unresolved&&hasPhotos(userId,d))try{await finishPhotoCleanup(userId,operationId);}catch{localCopyRetained=true;}
+                    return {discarded:true,committed,recoveryRetained:unresolved,localCopyRetained};
+                }));
             },
             async stageDraft(args) { return lock(()=>writeDraft(args)); },
             async checkFolders(control) {
@@ -1401,6 +1431,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 api.assertWriteAllowed(userId);
                 if(!options.metadataStore?.read || !options.metadataStore?.commit) throw new Error('Čuvanje nije aktivirano. Nacrt je očuvan.');
                 return lock(async()=>{
+                    if(journal().discardedDrafts?.[operationId])throw Error('Odbacena operacija se ne moze ponovo pokrenuti.');
                     let d=journal().draft; if(!d) throw new Error('Nema sačuvanog nacrta.');
                     if(d.operationId!==operationId)throw staleDraft();checkDraftRevision(d,expectedRevision);
                     if(!d.sealed)throw Error('Prvo potvrdite sadržaj nacrta za čuvanje.');
@@ -1423,6 +1454,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     const refs=[...d.attachments];
                     if(d.pending.length) { needToken(); await api.checkFolders(control);valid();markSavePhase(d,'external'); }
                     for(const a of d.pending) {
+                        if(Object.values(journal().abandonedDrafts||{}).some(r=>r.userId===userId&&r.pending?.some(p=>p.sha256===a.sha256&&p.size===a.size&&p.mime===a.mime)))throw Error('Ova slika pripada nerazresenom prenosu odbacenog nacrta. Prvo proverite evidenciju oporavka; nema duplog slanja.');
                         const key=await hashText('upload:'+d.operationId+':'+a.sha256);
                         const job=journal().jobs[key];
                         const remote=job ? await getFile(job.id,control) : null;
@@ -2122,7 +2154,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.01.3';
+        const RELEASE_VERSION = '2026.11.01.4';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2515,6 +2547,14 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             </section>;
         }
 
+        function AbandonedDraftRecovery({user}) {
+            const service=window.attachmentService,[,refresh]=useState(0);
+            useEffect(()=>service.subscribe(()=>refresh(v=>v+1)),[service]);
+            let rows=[];try{rows=service.getAbandonedDrafts(user.uid);}catch(e){return <p role="alert">{e.message}</p>;}
+            if(!rows.length)return null;
+            return <section className="notice" aria-label="Odbaceni nacrti za oporavak"><h2>Nedovrseni prenosi iz odbacenih nacrta</h2><p>Aktivni nacrti su odbaceni. Fajlovi na Drive-u nisu brisani. Ove operacije se ne nastavljaju automatski. Sacuvajte podatke sajta dok se prenosi ne provere.</p>{rows.map(r=><details key={r.operationId}><summary>{r.name} — potrebna provera prenosa</summary><p>Garancija: {r.id} · Operacija: {r.operationId}</p>{Object.entries(r.jobs).map(([key,j])=><p key={key}>{j.name} · ID: {j.id} · {j.state}</p>)}{!Object.keys(r.jobs).length&&<p>Nema rezervisanog ID-a; spoljna faza ostaje zabelezena za proveru.</p>}</details>)}</section>;
+        }
+
         function SavedAttachmentRecovery({records,user,onOpen}) {
             const service=window.attachmentService,[,refresh]=useState(0),[busy,setBusy]=useState(false),[error,setError]=useState('');
             useEffect(()=>service.subscribe(()=>refresh(v=>v+1)),[service]);
@@ -2730,7 +2770,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     <div className="home-screen" hidden={view!=='list'}>
                         <section className="hero"><h1 data-page-heading tabIndex={-1}>Računi i garancije</h1><div className="home-actions"><button type="button" className="primary icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</div></section>
                         {currentDraftStatus==='error'&&draftStatusWarning}
-                        {view==='list'&&<><SavedAttachmentRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail',w);}}/><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail',w);}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije su uklonjene.')}/></>}
+                        {view==='list'&&<><AbandonedDraftRecovery user={user}/><SavedAttachmentRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail',w);}}/><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail',w);}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije su uklonjene.')}/></>}
                         <Catalog key={user.uid} records={warranties} user={user} listState={listState} onRetry={()=>setRetry(r=>r+1)} onOpen={w=>{setSelected(w);navigate('detail',w);}}/>
                     </div>
                     {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} requireEmptyDraft={newEntry} expectedResume={resumeEntry} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>returnTo(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list',true)} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list',true);setNotice('Nacrt je odbačen.');}} user={user}/></div>}
@@ -3117,7 +3157,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
 
             const discard = async () => {
-                if (appNavigation.pending || disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current || removingRef.current || sealed) return;
+                if (appNavigation.pending || disposed.current || discardingRef.current || savingRef.current || processingRef.current || stagingRef.current || removingRef.current) return;
                 discardingRef.current = true; setDiscarding(true);
                 try {
                     const d = service.getDraft(user.uid);
@@ -3125,8 +3165,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if(service.pendingFingerprint(d.pending)!==draftPending.current)throw Error('Prilozi nacrta su promenjeni u drugoj kartici. Ponovo otvorite nacrt; ništa nije prepisano.');
                     if(service.contentRevision(d)!==draftRevisionRef.current)throw Object.assign(Error('Nacrt je promenjen u drugoj kartici. Odbacivanje je zaustavljeno; aktuelni nacrt nije obrisan.'),{code:'DRAFT_STALE'});
                     const expected = window.garancijeFingerprint(d);
-                    if (!window.confirm('Odbaci ovaj nezavršeni nacrt? Njegovi nesačuvani podaci i lokalni prilozi biće uklonjeni sa ovog uređaja. Sačuvane garancije i fajlovi na Drive-u neće biti obrisani.')) return;
+                    if (!window.confirm('Odbaci aktivni nacrt bez ponovnog biranja fotografija? Aplikacija prvo proverava cuvanje. Sacuvana garancija i Drive fajlovi ostaju. Moguci nedovrseni prenosi ostaju u vidljivoj evidenciji za oporavak; nece se sami nastavljati. Ako provera ne uspe, nacrt ostaje.')) return;
                     const discarded=await service.discardDraft({userId:user.uid,id:d.id,operationId:d.operationId,expected,expectedRevision:()=>draftRevisionRef.current});
+                    if(discarded?.recoveryRetained)window.alert('Aktivni nacrt je odbacen. Nedovrseni prenosi ostaju u evidenciji na pocetnoj strani. Drive fajlovi nisu brisani.');
+                    else if(discarded?.committed)window.alert('Cuvanje je potvrdjeno. Sacuvana garancija i njeni prilozi ostaju; zatvoren je samo lokalni nacrt.');
                     if(discarded?.localCopyRetained)window.alert('Nacrt je odbačen. Pregledač nije uspeo da ukloni njegovu lokalnu kopiju fotografije; podaci na Drive-u nisu menjani.');
                     disposed.current = true; mounted.current = false;
                     for (const url of pendingUrls.current) URL.revokeObjectURL(url);
@@ -3208,7 +3250,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                             <button type="submit" disabled={saving || processing || removing} className="primary flex-1 py-3 font-bold disabled:opacity-50">{saving ? 'Čuvanje...' : error ? 'Pokušaj ponovo' : 'Sačuvaj'}</button>
                         </div>
                         <div className="border-t pt-4">
-                            <button type="button" onClick={discard} disabled={saving || processing || staging || removing || discarding || sealed} className="w-full min-w-0 min-h-[48px] whitespace-normal break-words px-4 py-3 border border-red-300 text-red-700 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed">Odbaci nacrt</button>
+                            <button type="button" onClick={discard} disabled={saving || processing || staging || removing || discarding} className="w-full min-w-0 min-h-[48px] whitespace-normal break-words px-4 py-3 border border-red-300 text-red-700 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed">Odbaci nacrt</button>
                         </div>
                     </fieldset>
                 </form>
