@@ -2095,7 +2095,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             </>;
         }
 
-        function AttachmentList({ attachments, user, onKindChange, onNameChange, onRemovePending, onSavedNameChange, onRemoveSaved, removeDisabled=false, pendingIds=[] }) {
+        function AttachmentList({ attachments, user, onKindChange, onNameChange, onRemovePending, onSavedNameChange, onRemoveSaved, nameEditDisabled=false, removeDisabled=false, pendingIds=[] }) {
             const [opened, setOpened] = useState(null);
             return <section className="attachment-list space-y-3" aria-label="Prilozi">
                 {attachments.length === 0 && <p className="text-slate-500">Nema priloga.</p>}
@@ -2107,7 +2107,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
                     {onNameChange&&pendingIds.includes(a.id)&&<div><label>Naziv priloga {n+1} (bez ekstenzije)<input type="text" aria-label={'Naziv priloga '+(n+1)} value={attachmentNames.base(a.name,a.mime,a.extension)} onChange={e=>onNameChange(a.id,e.target.value)} autoComplete="off"/></label><p className="small muted">Ekstenzija je zaključana: {a.extension||attachmentNames.extension(a.mime,a.name)}{a.kind==='Ostalo'?' · Slobodan naziv po vašem izboru.':''}</p>{a.nameTruncated&&<p role="status" className="small muted">Automatski predlog je skraćen na 120 znakova. Pregledajte ceo naziv iznad.</p>}{nameError&&<p role="alert" className="error">{nameError}</p>}</div>}
                     {onRemovePending&&pendingIds.includes(a.id)&&!a.legacy&&!a.driveFileId&&!a.storage&&<button type="button" disabled={removeDisabled} aria-label={'Ukloni iz nacrta: '+a.name} onClick={()=>onRemovePending(a.id)} className="danger pending-remove">Ukloni iz nacrta</button>}
-                    {onSavedNameChange&&!a.legacy&&window.garancijeSavedAttachments.ref(a)&&<label>Naziv sacuvanog priloga (primenjuje se na Sacuvaj)<input type="text" value={attachmentNames.base(a.name,a.mime,a.extension)} disabled={removeDisabled} onChange={e=>onSavedNameChange(a.id,e.target.value)}/><span className="small muted">Ekstenzija je zakljucana.</span></label>}
+                    {onSavedNameChange&&!a.legacy&&window.garancijeSavedAttachments.ref(a)&&<label>Naziv sacuvanog priloga (primenjuje se na Sacuvaj)<input type="text" value={attachmentNames.base(a.name,a.mime,a.extension)} disabled={nameEditDisabled} onChange={e=>onSavedNameChange(a.id,e.target.value)}/><span className="small muted">Ekstenzija je zakljucana.</span></label>}
                     {onRemoveSaved&&!a.legacy&&window.garancijeSavedAttachments.ref(a)&&<button type="button" className="danger" disabled={removeDisabled} onClick={()=>onRemoveSaved(a.id)}>Ukloni prilog</button>}
                     {thumbnail && !a.legacy && <img src={thumbnail} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
                     <button type="button" aria-label={"Prikaži prilog: " + a.name} disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="attachment-open-button text-blue-700 border rounded-xl px-3 py-2">Prikaži prilog</button>
@@ -2122,7 +2122,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.01.2';
+        const RELEASE_VERSION = '2026.11.01.3';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -3198,7 +3198,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         <details className="small muted"><summary>Granice galerije i nacrt</summary><p>Do 5 slika i 30 MiB po izboru, 10 MiB po novoj slici; do 10 novih galerijskih priloga i 50 MiB njihovih originala uz nacrt. Do 24 megapiksela i 20.000 px po strani. JPEG/PNG proveravamo pre otvaranja; GIF, WebP, BMP i AVIF tek posle dekodiranja. Memorija pregledača time nije garantovano ograničena.</p></details>
                         {pending.some(a=>a.documentPhoto!==true)&&<p className="small muted">Galerija: nacrt pamti podatke i hash, ne i originalne slike. Posle osvežavanja ponovo izaberite iste originale.</p>}
                         {pending.some(a=>a.documentPhoto===true&&a.original)&&<p className="small muted">Dokumenti: potvrđene fotografije imaju lokalnu kopiju uz nacrt. Brisanje podataka sajta može ukloniti te kopije.</p>}
-                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} onRemovePending={sealed?null:removePending} onSavedNameChange={sealed?null:changeSavedName} onRemoveSaved={sealed?null:runSavedRemoval} removeDisabled={saving||processing||staging||removing||!!documentFile||blocked()} />
+                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} onRemovePending={sealed?null:removePending} onSavedNameChange={sealed?null:changeSavedName} onRemoveSaved={sealed?null:runSavedRemoval} nameEditDisabled={saving||processing||removing||sealed||!!documentFile||blocked()} removeDisabled={saving||processing||staging||removing||!!documentFile||blocked()} />
                         {removalNotice&&<p role="status">{removalNotice}</p>}
                         <LocalPhotoCleanup user={user} disabled={saving||processing||staging||removing||sealed||blocked()} onComplete={()=>setRemovalNotice('Lokalna kopija je uklonjena.')}/>
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}

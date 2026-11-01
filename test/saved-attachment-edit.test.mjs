@@ -343,3 +343,60 @@ test('stale draft for deleted existing warranty cannot recreate it or upload pen
  assert.equal(h.records.size,0);assert.equal(h.writes.length,0);assert.equal(h.calls.length,0);
  assert.equal(h.service.getDraft(h.user.uid).operationId,d.operationId);
 });
+
+test('Chromium DOM focus/caret and real draft autosave through rapid saved/pending/product edits',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
+ const {createRequire}=await import('node:module'),req=createRequire(import.meta.url);
+ let pw;try{pw=req('playwright');}catch{pw=req(process.env.GP_PLAYWRIGHT_PATH);}
+ const babel=req(process.env.GP_BABEL_PATH);
+ const urls=[...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m=>m[1]).filter(x=>/react(?:-dom)?@/.test(x));
+ const libs=await Promise.all(urls.map(async u=>{const r=await fetch(u);assert.equal(r.status,200);return r.text();}));
+ const browser=await pw.chromium.launch({headless:true,...(process.env.GP_CHROMIUM_PATH?{executablePath:process.env.GP_CHROMIUM_PATH}:{})});
+ try{
+  const page=await browser.newPage();page.on('pageerror',e=>console.log('DOM_ERROR',e.message));let requests=0;
+  await page.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<div id="root"></div>'}):(requests++,r.abort()));
+  await page.goto('http://localhost/');for(const content of libs)await page.addScriptTag({content});
+  await page.addScriptTag({content:script});
+  const component=html.slice(html.indexOf('        function AttachmentList('),html.indexOf('        const draftConflictMessage'));
+  const start=html.indexOf('            useEffect(()=>{',html.indexOf('exitContent.current=stagedContent;'));
+  const effect=html.slice(start,html.indexOf('            const allowExit=',start));
+  const hs=html.indexOf('            const changeSavedName='),handler=html.slice(hs,html.indexOf('\n            };',hs)+15);
+  const parent=html.split('\n').find(l=>l.includes('<AttachmentList attachments={[...legacy, ...attachments, ...pending]}'));
+  const code=[
+   "const {useState,useEffect,useRef}=React,attachmentNames=window.attachmentNames,attachmentKinds=['Ostalo'],appNavigation={pending:false},AttachmentViewer=()=>null;",
+   "window.firebaseDeps={auth:{currentUser:{uid:'synthetic-owner',email:"+JSON.stringify(/const EMAIL = '([^']+)'/.exec(script)[1])+"}}};",
+   "const service=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-dom',storage:localStorage,getUser:()=>window.firebaseDeps.auth.currentUser,fetch:()=>{throw Error('NETWORK_FORBIDDEN');}});",
+   "const actualStage=service.stageDraft.bind(service);window.stageTransitions=[];service.stageDraft=args=>new Promise(r=>setTimeout(r,35)).then(()=>actualStage(args)).then(d=>{window.stageTransitions.push(d);return d;});window.service=service;",
+   component,
+   "function Fixture(){const user=window.firebaseDeps.auth.currentUser,initial={id:'dom-warranty',name:'Product',attachments:"+JSON.stringify([ref(1)])+"};",
+   "const [form,setForm]=useState({name:'Product'}),[attachments,setAttachments]=useState(initial.attachments),[pending,setPending]=useState([{id:'pending',name:'Pending.jpg',mime:'image/jpeg',sha256:'c'.repeat(64),size:5,kind:'Ostalo'}]);",
+   "const [staging,setStaging]=useState(false),[sealed,setSealed]=useState(false),[safety,setSafety]=useState(false);const saving=safety,processing=false,removing=false,stale=false,conflict=null,resolving=false,documentFile=null,legacy=[],blocked=()=>false;",
+   "const mounted=useRef(true),disposed=useRef(false),discardingRef=useRef(false),savingRef=useRef(false),removingRef=useRef(false),processingRef=useRef(false),stagingRef=useRef(false),stageSequence=useRef(0),draftOperation=useRef('dom-operation'),draftPending=useRef(service.pendingFingerprint([])),draftRevisionRef=useRef(service.contentRevision(null)),stageTask=useRef(null),stageAcknowledged=useRef(null),exitContent=useRef(null);",
+   "savingRef.current=saving;window.setSafety=setSafety;window.staging=staging;const acknowledgeDraft=d=>{draftPending.current=service.pendingFingerprint(d.pending);draftRevisionRef.current=service.contentRevision(d);setSealed(!!d.sealed);};const handleDraftError=e=>{window.fixtureError=e.message;};const stagedContent=window.garancijeFingerprint({form,attachments,pending:service.pendingFingerprint(pending)});exitContent.current=stagedContent;",
+   effect,handler,
+   "const changeKind=()=>{},removePending=()=>{},runSavedRemoval=()=>{},changePendingName=(id,value)=>setPending(p=>p.map(a=>a.id===id?{...a,name:value+'.jpg'}:a));",
+   'return <><input aria-label="Product name" value={form.name} onChange={e=>setForm({name:e.target.value})}/>{'+parent.trim()+'}</>;}',
+   "service.authChanged(window.firebaseDeps.auth.currentUser).then(()=>ReactDOM.createRoot(document.getElementById('root')).render(<Fixture/>));"
+  ].join('\n');
+  await page.addScriptTag({content:babel.transform(code,{presets:[['react',{runtime:'classic'}]]}).code});
+  await page.waitForFunction(()=>window.stageTransitions?.length>0,null,{timeout:5000});
+  const saved=page.locator('input').nth(1);assert.equal(await saved.inputValue(),'Image-1');
+  await saved.focus();await saved.evaluate(e=>{window.originalInput=e;window.blurCount=0;window.disabledDuringTyping=0;new MutationObserver(()=>{if(e.disabled)window.disabledDuringTyping++;}).observe(e,{attributes:true,attributeFilter:['disabled']});e.addEventListener('blur',()=>window.blurCount++);e.setSelectionRange(2,2);});
+  await page.keyboard.type('abc',{delay:1});await page.waitForTimeout(100);
+  assert.deepEqual(await saved.evaluate(e=>({same:e===window.originalInput,focus:e===document.activeElement,caret:e.selectionStart,disabled:e.disabled,blur:window.blurCount})),{same:true,focus:true,caret:5,disabled:false,blur:0});
+  await page.keyboard.press('Backspace');await page.keyboard.insertText('Ž paste ');
+  await saved.dispatchEvent('compositionstart',{data:''});await page.keyboard.insertText('漢');await saved.dispatchEvent('compositionend',{data:'漢'});
+  await page.waitForTimeout(150);const value=await saved.inputValue();
+  assert.equal(await page.evaluate(()=>window.service.getDraft('synthetic-owner').attachments[0].name),value+'.jpg');
+  assert.equal(await saved.evaluate(e=>e===document.activeElement&&e===window.originalInput),true);assert.equal(await page.evaluate(()=>window.blurCount),0);assert.equal(await page.evaluate(()=>window.disabledDuringTyping),0);assert.ok(await page.evaluate(()=>window.stageTransitions.length>1));
+  for(const label of ['Naziv priloga 2','Product name']){
+   const input=page.getByRole('textbox',{name:label,exact:true});await input.focus();await input.press('End');await input.pressSequentially('quick',{delay:1});await input.press('Backspace');await page.waitForTimeout(100);
+   assert.equal(await input.evaluate(e=>e===document.activeElement),true);const v=await input.inputValue();
+   const persisted=await page.evaluate(l=>{const d=window.service.getDraft('synthetic-owner');return l==='Product name'?d.metadata.name:d.pending[0].name;},label);assert.equal(persisted,label==='Product name'?v:v+'.jpg');
+  }
+  await page.evaluate(()=>window.setSafety(true));assert.equal(await saved.isDisabled(),true);
+  await page.evaluate(()=>window.setSafety(false));assert.equal(await saved.isDisabled(),false);
+  assert.equal(await page.evaluate(()=>window.fixtureError),undefined);assert.equal(requests,0);
+  console.log('DOM: stable node/focus/caret; typing/delete/paste/composition; pending/product; latest actual stageDraft; Save lock; zero network');
+ }finally{await browser.close();}
+});
+
