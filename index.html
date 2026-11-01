@@ -273,7 +273,7 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
     <script type="module" data-gp-dependency="firebase" onerror="window.garancijeBoot.failed('firebase')">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, onSnapshot, addDoc, updateDoc, doc, runTransaction, getDocFromServer, getDocsFromServer } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, onSnapshot, addDoc, updateDoc, doc, runTransaction, getDocFromServer, getDocsFromServer, deleteField } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         const firebaseConfig = {
           apiKey: "AIzaSyDAqkl8MzPRjVg9MVxc2lMsbdvRmGi_P2A",
@@ -288,7 +288,7 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         const auth = getAuth(app);
         const db = getFirestore(app);
         const provider = new GoogleAuthProvider();
-        window.firebaseDeps = { auth, db, appId: "registar-garancija-74a34", provider, signInWithPopup, signOut, onAuthStateChanged, collection, onSnapshot, addDoc, updateDoc, doc, runTransaction, getDocFromServer, getDocsFromServer };
+        window.firebaseDeps = { auth, db, appId: "registar-garancija-74a34", provider, signInWithPopup, signOut, onAuthStateChanged, collection, onSnapshot, addDoc, updateDoc, doc, runTransaction, getDocFromServer, getDocsFromServer, deleteField };
         window.garancijeBoot.loaded('firebase');
     </script>
 
@@ -317,6 +317,54 @@ window.garancijeAttachmentCounts=(()=>{
  };
  return Object.freeze({display,known,names,validName});
 })();
+// Saved attachment operations contain metadata only; no tokens or image bytes.
+window.garancijeSavedAttachments=(()=>{
+ const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
+ const withoutEdit=record=>{const {_attachmentEdit,...rest}=record;return rest;};
+ const ref=a=>object(a)&&typeof a.id==='string'&&a.id.length>0&&a.storage==='google-drive'&&
+  /^[A-Za-z0-9_-]{10,200}$/.test(a.driveFileId||'')&&/^[a-f0-9]{64}$/i.test(a.sha256||'')&&
+  Number.isSafeInteger(a.size)&&a.size>0&&/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(a.mime||'')&&typeof a.name==='string';
+ const same=(a,b)=>['id','driveFileId','storage','sha256','size','mime'].every(k=>a?.[k]===b?.[k]);
+ const hash=value=>window.garancijeDeletionHash(value);
+ const row=a=>({attachmentId:a.id,fileId:a.driveFileId,oldName:a.name,mime:a.mime,size:a.size,sha256:a.sha256});
+ const valid=(op,uid)=>{
+  if(!object(op)||op.version!==1||op.userId!==uid||!['rename','remove'].includes(op.kind)||
+   typeof op.operationId!=='string'||op.operationId.length<1||op.operationId.length>128||
+   !/^[a-f0-9]{64}$/.test(op.baseHash||'')||!Array.isArray(op.targets)||!op.targets.length||op.targets.length>200||
+   op.kind==='remove'&&(op.targets.length!==1||!/^[a-f0-9]{64}$/.test(op.postHash||'')))throw Error('Operacija priloga nije prepoznata. Nema upisa.');
+  const ids=new Set(),files=new Set();
+  for(const t of op.targets){
+   if(!object(t)||!ref({id:t.attachmentId,driveFileId:t.fileId,storage:'google-drive',name:t.oldName,mime:t.mime,size:t.size,sha256:t.sha256})||
+    ids.has(t.attachmentId)||files.has(t.fileId))throw Error('Identitet operacije priloga nije jednoznacan.');
+   ids.add(t.attachmentId);files.add(t.fileId);
+   if(op.kind==='rename'&&window.attachmentNames.validate({name:t.newName,mime:t.mime})!==t.newName)throw Error('Naziv priloga nije ispravan.');
+  }
+  return op;
+ };
+ const renameTargets=(base,desired)=>{
+  const saved=base?.attachments??[];
+  if(!Array.isArray(saved)||!Array.isArray(desired))throw Error('Reference priloga nisu podrzane.');
+  const ids=new Set(),targets=[];
+  for(const old of saved)if(!old||typeof old.id!=='string'||desired.filter(a=>a?.id===old.id).length!==1)throw Error('Sacuvani prilog se uklanja posebnom neposrednom akcijom, ne kroz Sacuvaj.');
+  for(const a of desired){
+   if(!a||typeof a.id!=='string'||ids.has(a.id))throw Error('Duple ili nepoznate reference priloga.');ids.add(a.id);
+   const originals=saved.filter(x=>x?.id===a.id);
+   if(originals.length!==1)throw Error('Sacuvani prilog nije jednoznacno potvrden.');
+   const old=originals[0];if(ref(old)&&!same(old,a))throw Error('Identitet sacuvanog fajla ne sme da se menja.');if(old.name===a.name)continue;
+   if(!ref(old)||!same(old,a)||saved.filter(x=>x?.driveFileId===old.driveFileId).length!==1)throw Error('Preimenovanje deljenog, starog ili nepoznatog priloga je blokirano.');
+   const newName=window.attachmentNames.validate(a);if(newName!==a.name)throw Error('Pregledajte i potvrdite ceo naziv priloga.');
+   if(window.attachmentNames.extension(old.mime,old.name)!==window.attachmentNames.extension(a.mime,a.name))throw Error('Ekstenzija sacuvanog priloga je zakljucana.');
+   targets.push({...row(old),newName});
+  }
+  return targets;
+ };
+ const prepareNames=(base,desired)=>desired.map(a=>{
+  const old=(base?.attachments||[]).find(item=>item?.id===a.id);
+  return old&&old.name!==a.name&&ref(a)?{...a,name:window.attachmentNames.validate(a)}:a;
+ });
+ return Object.freeze({withoutEdit,ref,same,row,hash,valid,renameTargets,prepareNames});
+})();
+
 // INTEGRATION METADATA ADAPTER
 window.garancijeDeletionHash=async value=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(window.garancijeFingerprint(value))))].map(x=>x.toString(16).padStart(2,'0')).join('');
 window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'production',metadataStore:{
@@ -338,7 +386,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
   return d.runTransaction(d.db,async tx=>{
    if(d.auth.currentUser?.uid!==userId)throw Error('Nalog se promenio.');
    const snapshot=await tx.get(ref),current=snapshot.exists()?snapshot.data():null;
-   if(!current||window.garancijeFingerprint(current)!==expected)throw Error('Zapis ili operacija su promenjeni. Ponovo pregledajte brisanje.');
+   if(!current||current._attachmentEdit||window.garancijeFingerprint(current)!==expected)throw Error('Zapis ili operacija su promenjeni. Ponovo pregledajte brisanje.');
    const old=current._attachmentDeletion;
    if(old&&old.operationId!==operation.operationId)throw Error('Druga operacija brisanja je već započeta.');
    if(d.auth.currentUser?.uid!==userId)throw Error('Nalog se promenio.');
@@ -351,6 +399,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
   return d.runTransaction(d.db,async tx=>{
    if(d.auth.currentUser?.uid!==userId)throw Error('Nalog se promenio.');
    const snapshot=await tx.get(ref),current=snapshot.exists()?snapshot.data():null,op=current?._attachmentDeletion;
+   if(current?._attachmentEdit)throw Error('Izmena priloga jos traje. Brisanje je blokirano.');
    if(op?.version!==1||op.userId!==userId||op.operationId!==operationId)throw Error('Operacija brisanja se promenila.');
    const file=op.files.find(f=>f.fileId===fileId);
    if(!file||file.state!==expectedState)throw Error('Status fajla je promenjen. Ponovo proverite operaciju.');
@@ -366,6 +415,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
    if(d.auth.currentUser?.uid!==userId)throw Error('Nalog se promenio.');
    const snapshot=await tx.get(ref);if(d.auth.currentUser?.uid!==userId)throw Error('Nalog se promenio.');if(!snapshot.exists())return {absent:true};
    const current=snapshot.data(),op=current._attachmentDeletion;
+   if(current._attachmentEdit)throw Error('Izmena priloga jos traje. Brisanje je blokirano.');
    if(op?.version!==1||op.userId!==userId||op.operationId!==operationId||op.files.some(f=>!['trashed','retained'].includes(f.state)))throw Error('Brisanje priloga još nije razrešeno.');
    const {_attachmentDeletion,...record}=current;
    if(await window.garancijeDeletionHash(record)!==op.expected)throw Error('Podaci garancije su promenjeni. Ponovo pregledajte i potvrdite brisanje.');
@@ -385,7 +435,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
    });
    const report={updated:0,unchanged:0,skipped:0,conflicts:0,countMismatches:0,uncertain:0,stopped:false};
    for(const target of targets){
-    if(target.id==='gp-live-integration-test-001'||target.record._attachmentDeletion||window.garancijeAttachmentCounts.known(target.record)===null){report.skipped++;continue;}
+    if(target.id==='gp-live-integration-test-001'||(target.record._attachmentDeletion||target.record._attachmentEdit)||window.garancijeAttachmentCounts.known(target.record)===null){report.skipped++;continue;}
     try{
      check();const ref=d.doc(d.db,'artifacts',d.appId,'users',userId,'warranties',target.id);
      const outcome=await d.runTransaction(d.db,async tx=>{
@@ -393,7 +443,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
       if(!snapshot.exists())return 'conflicts';
       const current=snapshot.data();
       if(window.garancijeFingerprint(current)!==target.expected)return 'conflicts';
-      if(current._attachmentDeletion)return 'skipped';
+      if(current._attachmentDeletion||current._attachmentEdit)return 'skipped';
       const attachmentCount=window.garancijeAttachmentCounts.known(current);
       if(attachmentCount===null)return 'skipped';
       if(!Number.isSafeInteger(current.attachmentCount)||current.attachmentCount!==attachmentCount)return 'countMismatches';
@@ -407,19 +457,70 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
    }
    return report;
   },
+  async beginAttachmentEdit({id,userId,expected,operation,isCurrent}) {
+   const d=window.firebaseDeps,h=window.garancijeSavedAttachments;
+   const conflict=()=>{throw Object.assign(Error('Zapis ili rezervacija priloga su promenjeni. Nema prepisivanja.'),{safeBeforeWrite:true});};
+   const check=()=>{if(d.auth.currentUser?.uid!==userId||isCurrent?.()!==true)conflict();};
+   check();const ref=d.doc(d.db,'artifacts',d.appId,'users',userId,'warranties',id);
+   return d.runTransaction(d.db,async tx=>{
+    check();const snapshot=await tx.get(ref);check();if(!snapshot.exists())conflict();const current=snapshot.data();
+    if(current._attachmentDeletion)conflict();
+    if(current._attachmentEdit){const op=h.valid(current._attachmentEdit,userId);if(op.operationId!==operation.operationId||op.kind!==operation.kind||window.garancijeFingerprint(op.targets)!==window.garancijeFingerprint(operation.targets))conflict();return current;}
+    if(operation.kind==='remove'&&current.lastAttachmentOperation?.operationId===operation.operationId)return current;
+    if(window.garancijeFingerprint(current)!==expected)conflict();
+    const targets=operation.targets;
+    if(!Array.isArray(targets)||!targets.length||targets.length>200)conflict();
+    // Compare each target explicitly; never accept a changed file identity or alias.
+    for(const target of targets){const rows=(current.attachments||[]).filter(a=>a?.id===target.attachmentId),a=rows[0];
+     if(rows.length!==1||!h.ref(a)||(current.attachments||[]).filter(x=>x?.driveFileId===target.fileId).length!==1||
+      ['fileId','oldName','mime','size','sha256'].some(k=>h.row(a)[k]!==target[k]))conflict();
+    }
+    let next=current;
+    if(operation.kind==='remove'){
+     if(targets.length!==1)conflict();const attachments=current.attachments.filter(a=>a.id!==targets[0].attachmentId);
+     const record={...current,attachments};next={...record,attachmentCount:window.garancijeAttachmentCounts.known(record),attachmentNames:window.garancijeAttachmentCounts.names(record)};
+    }
+    const op={version:1,userId,operationId:operation.operationId,kind:operation.kind,targets,
+     baseHash:await h.hash(current),...(operation.kind==='remove'?{postHash:await h.hash(next)}:{})};h.valid(op,userId);check();
+    if(operation.kind==='remove')tx.update(ref,{attachments:next.attachments,attachmentCount:next.attachmentCount,attachmentNames:next.attachmentNames,_attachmentEdit:op});
+    else tx.update(ref,{_attachmentEdit:op});
+    return {...next,_attachmentEdit:op};
+   });
+  },
+  async finishAttachmentRemoval({id,userId,operationId,isCurrent}) {
+   const d=window.firebaseDeps,h=window.garancijeSavedAttachments;
+   const check=()=>{if(d.auth.currentUser?.uid!==userId||isCurrent?.()!==true)throw Error('Operacija uklanjanja vise nije aktivna.');};check();
+   const ref=d.doc(d.db,'artifacts',d.appId,'users',userId,'warranties',id);
+   return d.runTransaction(d.db,async tx=>{
+    check();const snapshot=await tx.get(ref);check();if(!snapshot.exists())throw Error('Garancija vise nije dostupna.');const current=snapshot.data();
+    if(!current._attachmentEdit&&current.lastAttachmentOperation?.operationId===operationId)return current;
+    const op=h.valid(current._attachmentEdit,userId),record=h.withoutEdit(current);
+    if(op.kind!=='remove'||op.operationId!==operationId||current._attachmentDeletion||await h.hash(record)!==op.postHash)throw Error('Zapis je promenjen tokom uklanjanja. Potreban je pregled.');
+    const lastAttachmentOperation={operationId,kind:'remove',attachmentId:op.targets[0].attachmentId};check();
+    tx.update(ref,{_attachmentEdit:d.deleteField(),lastAttachmentOperation});return {...record,lastAttachmentOperation};
+   });
+  },
   async commit({id,userId,operationId,expected,metadata,attachments,isCurrent}) {
   const d=window.firebaseDeps;const check=()=>{if(d.auth.currentUser?.uid!==userId||isCurrent?.()===false)throw Error('Nalog ili pokušaj čuvanja se promenio.');};check();
   const ref=d.doc(d.db,'artifacts',d.appId,'users',userId,'warranties',id);
   return d.runTransaction(d.db,async tx=>{
    check();const snapshot=await tx.get(ref);check();const current=snapshot.exists()?snapshot.data():null;
-   if(current?._attachmentDeletion)throw Error('Brisanje ove garancije je započeto. Nema novog čuvanja.');
+   if(current?._attachmentDeletion)throw Error('Brisanje ove garancije je zapoceto. Nema novog cuvanja.');
+    const edit=current?._attachmentEdit;
+    if(edit&&(edit.operationId!==operationId||edit.kind!=='rename'))throw Error('Druga operacija priloga jos traje.');
    if(current?.lastOperation===operationId)return;
-   if(window.garancijeFingerprint(current)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je očuvan.');
+   const base=edit?window.garancijeSavedAttachments.withoutEdit(current):current;
+    if(edit){window.garancijeSavedAttachments.valid(edit,userId);if(await window.garancijeSavedAttachments.hash(base)!==edit.baseHash)throw Error('Osnova preimenovanja je promenjena.');
+      const targets=window.garancijeSavedAttachments.renameTargets(base,attachments);
+      if(window.garancijeFingerprint(targets)!==window.garancijeFingerprint(edit.targets))throw Error('Plan preimenovanja se promenio.');}
+    if(window.garancijeFingerprint(base)!==expected)throw Error('Konkurentna izmena: nema prepisivanja. Nacrt je ocuvan.');
    const safe=Object.fromEntries(['name','category','purchaseDate','baseMonths','extendedMonths','store','description','purchasePriceMinor','currency','invoiceNumber','fiscalReceiptUrl'].map(k=>[k,metadata[k]]).filter(([,v])=>v!==undefined));
    const attachmentRecord={...current,attachments};
    const attachmentCount=window.garancijeAttachmentCounts.known(attachmentRecord);
    const attachmentNames=window.garancijeAttachmentCounts.names(attachmentRecord);
-   check();tx.set(ref,{...safe,attachments,attachmentCount,attachmentNames,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
+   check();
+    if(edit)tx.update(ref,{...safe,attachments,attachmentCount,attachmentNames,lastOperation:operationId,_attachmentEdit:d.deleteField()});
+    else tx.set(ref,{...safe,attachments,attachmentCount,attachmentNames,lastOperation:operationId,...(!current?{createdAt:new Date().toISOString()}:{})},{merge:true});
   });
  }
 }};
@@ -761,7 +862,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         const draftFields=['name','category','purchaseDate','baseMonths','extendedMonths','store','description','purchasePriceMinor','currency','invoiceNumber','fiscalReceiptUrl'];
         const draftFieldLabels=['Naziv proizvoda','Kategorija','Datum kupovine','Trajanje (meseci)','Produžena garancija','Prodavnica','Opis','Cena','Valuta','Broj računa','Fiskalni link'];
         const prewriteSafe = async draft => {
-            if(!draft?.sealed||draft.saveState?.version!==1||draft.saveState.phase!=='preflight')return false;
+            if(savedIntent(draft?.id)||!draft?.sealed||draft.saveState?.version!==1||draft.saveState.phase!=='preflight')return false;
             for(const a of draft.pending){const key=await hashText('upload:'+draft.operationId+':'+a.sha256);if(journal().jobs[key])return false;}
             return true;
         };
@@ -796,6 +897,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         // Called only while the existing journal WebLock is held.
         const writeDraft = ({userId,id,base,metadata,attachments,pending,operationId,expectedPending,expectedRevision,isCurrent,onStaged,seal=false,allowSealed=false}) => {
             assertUser(userId);
+            const edit=savedIntent(id||journal().draft?.id);
+            if(edit&&!(edit.operation.kind==='rename'&&edit.draftOperationId===operationId&&seal&&allowSealed))throw savedUncertain();
             if(isCurrent&&!isCurrent())throw new DOMException('Zastareli upis nacrta je otkazan.','AbortError');
             const expected=typeof expectedPending==='function'?expectedPending():expectedPending;
             let draft;
@@ -881,6 +984,142 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             assertUser(uid);return options.metadataStore.deletionProgress({id,userId:uid,operationId:op.operationId,fileId:file.fileId,state,reason,expectedState:file.state});
         };
 
+        const savedHelper=window.garancijeSavedAttachments;
+        const savedKey=id=>String(id);
+        const savedIntent=id=>journal().attachmentEdits?.[savedKey(id)];
+        const savedUncertain=()=>Error('Operacija priloga nije zavrsena. Koristite Nastavi operaciju priloga; Sačuvaj ne vraca uklonjenu referencu.');
+        const savedStoreCall=async(method,args,current)=>{
+            let active=true;
+            try{return await bounded(async check=>{const result=await options.metadataStore[method]({...args,isCurrent:()=>{check();return active&&current();}});check();return result;},
+                {ms:waits.commit,current:()=>active&&current(),code:'ATTACHMENT_COMMIT_UNCERTAIN',text:'Potvrda izmene priloga nije stigla. Ishod treba proveriti istom operacijom.',uncertain:true});}
+            catch(error){active=false;throw error;}
+        };
+        const savedSharedCheck=async(uid,id,targets,removing,current)=>{
+            const records=await options.metadataStore.list(uid);current();
+            if(!Array.isArray(records))throw Error('Potpuna lista referenci nije dostupna. Nema Drive upisa.');
+            const files=new Set(targets.map(t=>t.fileId));
+            for(const record of records){
+                const rows=record.attachments;
+                if(rows!=null&&!Array.isArray(rows))throw Error('Nepoznate reference: Drive upis je blokiran.');
+                for(const a of rows||[]){
+                    if(!a||typeof a!=='object'||Array.isArray(a))throw Error('Nepoznata referenca: Drive upis je blokiran.');
+                    if(record.id===id&&!removing)continue;
+                    if(files.has(a.driveFileId))throw Error('Isti fajl koristi druga referenca. Promena je blokirana.');
+                    if(record.id!==id&&!a.driveFileId&&!(typeof a.dataUrl==='string'&&/^data:image\//i.test(a.dataUrl)))throw Error('Nije moguce dokazati da fajl nije deljen.');
+                }
+                if(record.id!==id){
+                    for(const key of ['receiptImage','warrantyImage'])if(record[key]&&!(typeof record[key]==='string'&&/^data:image\//i.test(record[key])))throw Error('Stara spoljasnja referenca nije razresena.');
+                    if(record._attachmentEdit){const op=savedHelper.valid(record._attachmentEdit,uid);if(op.targets.some(t=>files.has(t.fileId)))throw Error('Fajl koristi druga aktivna operacija.');}
+                }
+            }
+            const d=journal().draft;
+            if(d&&d.id!==id&&(d.attachments||[]).some(a=>files.has(a.driveFileId)))throw Error('Fajl koristi drugi nacrt.');
+        };
+        const savedFile=async(row,kind,current)=>{
+            const fields='id,name,mimeType,size,parents,appProperties,trashed,ownedByMe,shared,permissions(type,role,emailAddress),capabilities(canRename,canTrash),sha256Checksum';
+            const result=await ordinaryRequest(API+'/files/'+encodeURIComponent(row.fileId)+'?fields='+fields,{},async response=>{
+                if(response.status===403||response.status===404)throw Error('Prilog nije dostupan ili dozvoljen (403/404). Referenca/operacija se ne smatra zavrsenom.');
+                return {remote:await json(response),etag:response.headers.get('etag')};
+            },{current});current();const r=result.remote;
+            if(r.id!==row.fileId||r.ownedByMe!==true||r.shared!==false||!r.permissions?.length||
+                r.permissions.some(p=>p.type!=='user'||p.role!=='owner'||p.emailAddress?.toLowerCase()!==EMAIL)||
+                !r.parents?.includes(DRIVE_FOLDERS.products)||r.appProperties?.app!=='garancije-pro'||
+                !/^[a-f0-9]{64}$/i.test(r.appProperties?.operation||'')||r.appProperties?.sha256!==row.sha256||
+                r.sha256Checksum?.toLowerCase()!==row.sha256.toLowerCase()||Number(r.size)!==row.size||r.mimeType!==row.mime)throw Error('Poreklo, privatnost ili sadrzaj priloga nisu potvrdeni.');
+            return result;
+        };
+        const savedDriveStep=async(row,kind,current,allowDone)=>{
+            const info=await savedFile(row,kind,current),r=info.remote;
+            if(kind==='remove'&&r.trashed===true){if(allowDone)return;throw Error('Prilog je vec u korpi; prvo proverite stanje.');}
+            if(kind==='rename'&&r.name===row.newName&&allowDone&&!r.trashed)return;
+            if(r.trashed||r.name!==row.oldName)throw Error('Naziv ili stanje Drive fajla je promenjeno. Nema prepisivanja.');
+            if(r.capabilities?.[kind==='rename'?'canRename':'canTrash']!==true)throw Error('Drive ne dozvoljava trazenu promenu.');
+            if(!info.etag)throw Error('Drive nije vratio ETag za uslovni upis. Promena nije poslata; potrebna je kontrolisana provera podrzane zastite.');
+            current();await ordinaryRequest(API+'/files/'+encodeURIComponent(row.fileId)+'?fields=id,name,trashed',{
+                method:'PATCH',headers:{'Content-Type':'application/json','If-Match':info.etag},
+                body:JSON.stringify(kind==='rename'?{name:row.newName}:{trashed:true})
+            },json,{current});
+            const verified=(await savedFile(row,kind,current)).remote;
+            if(kind==='rename'?(verified.trashed||verified.name!==row.newName):verified.trashed!==true)throw Error('Ishod Drive promene nije potvrdjen. Nastavite istu operaciju.');
+        };
+        const savedPreflight=async(uid,id,targets,kind,current,resume=false)=>{
+            await savedSharedCheck(uid,id,targets,false,current);
+            for(const row of targets){const info=await savedFile(row,kind,current),r=info.remote;
+                const alreadyDone=resume&&(kind==='remove'?r.trashed===true:r.name===row.newName&&!r.trashed);
+                if(alreadyDone)continue;
+                if(r.trashed||r.name!==row.oldName||r.capabilities?.[kind==='rename'?'canRename':'canTrash']!==true||!info.etag)
+                    throw Error('Prilog nije spreman za uslovnu promenu (naziv/dozvola/ETag). Nema novog upisa.');
+            }
+        };
+        const savedRecordCheck=async(uid,id,op,current)=>{
+            const record=await readMetadata(id,uid,current);current();
+            if(!record||record._attachmentDeletion||record._attachmentEdit?.operationId!==op.operationId)throw Error('Rezervacija priloga je promenjena.');
+            const live=savedHelper.valid(record._attachmentEdit,uid);
+            if(await savedHelper.hash(savedHelper.withoutEdit(record))!==(live.kind==='remove'?live.postHash:live.baseHash))throw Error('Zapis je konkurentno promenjen. Nema daljeg Drive upisa.');
+            return record;
+        };
+        const syncRemovedDraft=async(uid,id,intent,record,complete=false)=>{
+            const d=journal().draft;if(!d||d.id!==id)return null;
+            if(d.operationId!==intent.draftOperationId)throw savedUncertain();
+            let base;try{base=JSON.parse(d.expected);}catch{throw savedUncertain();}
+            const op=intent.operation,hash=await savedHelper.hash(savedHelper.withoutEdit(base));
+            const completed=base.lastAttachmentOperation?.operationId===op.operationId;
+            if(hash!==op.baseHash&&hash!==op.postHash&&!completed)throw savedUncertain();
+            const matches=d.attachments.filter(a=>a.id===op.targets[0].attachmentId);
+            if(matches.some(a=>a.driveFileId!==op.targets[0].fileId)||matches.length>1)throw savedUncertain();
+            let result;mutateJournal(j=>{
+                if(canonical(j.draft)!==canonical(d))throw staleDraft();assertUser(uid);
+                const pending=d.pending.map(a=>a.autoNamed===true&&!a.nameCustom?{...a,retainedAutoName:{product:String(d.metadata.name||''),kind:a.kind,name:a.name}}:a);
+                result={...d,expected:canonical(record),attachments:d.attachments.filter(a=>a.id!==op.targets[0].attachmentId),pending,
+                    revision:nextDraftRevision(d),attachmentEditPending:complete?null:op.operationId};j.draft=result;
+            });notify();return result;
+        };
+        const resumeSavedRemoval=async(uid,id,isCurrent=()=>true,onUnlinked=()=>{})=>{
+            api.assertWriteAllowed(uid);needToken();const current=()=>{assertUser(uid);if(isCurrent()!==true)throw aborted();return true;};
+            let record=await readMetadata(id,uid,current),intent=savedIntent(id);
+            if(!record)throw Error('Garancija nije dostupna.');
+            if(!intent&&record._attachmentEdit?.kind==='remove'){
+                const op=savedHelper.valid(record._attachmentEdit,uid),d=journal().draft;
+                if(d?.id===id)throw Error('Oporavak zahteva originalni dnevnik ove izmene; nacrt nije prepisan.');
+                intent={userId:uid,id,operation:op,draftOperationId:null};mutateJournal(j=>{j.attachmentEdits={...j.attachmentEdits,[savedKey(id)]:intent};});
+            }
+            if(!intent||intent.userId!==uid||intent.operation.kind!=='remove')throw savedUncertain();
+            let op=intent.operation;
+            if(!record._attachmentEdit&&record.lastAttachmentOperation?.operationId===op.operationId){
+                const draft=await syncRemovedDraft(uid,id,intent,record,true);mutateJournal(j=>{delete j.attachmentEdits[savedKey(id)];});notify();return {record,draft,removed:true};
+            }
+            if(!record._attachmentEdit){
+                record=await savedStoreCall('beginAttachmentEdit',{id,userId:uid,expected:intent.expected,operation:op},current);
+            }
+            op=savedHelper.valid(record._attachmentEdit,uid);if(op.kind!=='remove'||op.operationId!==intent.operation.operationId)throw savedUncertain();
+            intent={...intent,operation:op};mutateJournal(j=>{j.attachmentEdits[savedKey(id)]=intent;});
+            const unlinkedDraft=await syncRemovedDraft(uid,id,intent,record);
+            onUnlinked({record,draft:unlinkedDraft});
+            await savedRecordCheck(uid,id,op,current);await savedSharedCheck(uid,id,op.targets,true,current);
+            await savedRecordCheck(uid,id,op,current);await savedDriveStep(op.targets[0],'remove',current,true);
+            await savedRecordCheck(uid,id,op,current);
+            record=await savedStoreCall('finishAttachmentRemoval',{id,userId:uid,operationId:op.operationId},current);
+            const draft=await syncRemovedDraft(uid,id,intent,record,true);
+            mutateJournal(j=>{if(j.attachmentEdits?.[savedKey(id)]?.operation.operationId!==op.operationId)throw savedUncertain();delete j.attachmentEdits[savedKey(id)];});
+            notify();return {record,draft,removed:true};
+        };
+        const runSavedRename=async(uid,d,record,current)=>{
+            const existing=record._attachmentEdit;
+            const base=existing?savedHelper.withoutEdit(record):record;
+            const targets=savedHelper.renameTargets(base,d.attachments);
+            if(!targets.length&&!existing)return record;
+            if(existing&&(existing.kind!=='rename'||existing.operationId!==d.operationId))throw savedUncertain();
+            const op=existing?savedHelper.valid(existing,uid):{version:1,userId:uid,kind:'rename',operationId:d.operationId,targets,baseHash:await savedHelper.hash(base)};
+            if(canonical(op.targets)!==canonical(targets))throw Error('Plan preimenovanja se promenio.');
+            savedHelper.valid(op,uid);
+            await savedPreflight(uid,d.id,op.targets,'rename',current,!!existing);
+            mutateJournal(j=>{j.attachmentEdits={...j.attachmentEdits,[savedKey(d.id)]:{userId:uid,id:d.id,operation:op,draftOperationId:d.operationId,expected:d.expected}};});
+            if(!existing)record=await savedStoreCall('beginAttachmentEdit',{id:d.id,userId:uid,expected:d.expected,operation:op},current);
+            markSavePhase(d,'external');
+            for(const row of op.targets){await savedRecordCheck(uid,d.id,op,current);await savedSharedCheck(uid,d.id,op.targets,false,current);await savedDriveStep(row,'rename',current,true);}
+            return record;
+        };
+
         const api = {
             mode: options.simulated ? 'simulated-drive' : 'google-drive', writesEnabled: !!options.allowWrites,
             assertWriteAllowed(userId) {
@@ -889,12 +1128,46 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             },
             subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
 
+            hasSavedAttachmentEdit(userId,id) {try{assertUser(userId);return savedIntent(id)||null;}catch{return null;}},
+            async removeSavedAttachment({userId,id,attachmentId,expectedRevision,expectedMetadata,expectedAttachments,expectedPending,isCurrent=()=>true,onUnlinked=()=>{}}) {
+                api.assertWriteAllowed(userId);needToken();
+                return lock(async()=>{
+                    const current=()=>{assertUser(userId);if(isCurrent()!==true)throw aborted();return true;};current();
+                    if(savedIntent(id))throw savedUncertain();
+                    const d=journal().draft;
+                    if(!d||!d.edit||d.id!==id||d.sealed||d.saveState||pendingCommits.size)throw Error('Prvo razresite zapoceto ili neizvesno cuvanje.');
+                    checkDraftRevision(d,expectedRevision);
+                    if(canonical(d.metadata)!==canonical(expectedMetadata)||canonical(d.attachments)!==canonical(expectedAttachments)||
+                        canonical(pendingMetadata(d.pending))!==(typeof expectedPending==='function'?expectedPending():expectedPending))throw staleDraft();
+                    for(const a of d.pending)if(journal().jobs[await hashText('upload:'+d.operationId+':'+a.sha256)])throw Error('Postoji rezervisan ili slat prilog. Prvo nastavite istu operaciju cuvanja.');
+                    const record=await readMetadata(id,userId,current);current();
+                    if(!record||record._attachmentDeletion||record._attachmentEdit||canonical(record)!==d.expected)throw Error('Zapis je promenjen. Nista nije uklonjeno.');
+                    const rows=(record.attachments||[]).filter(a=>a?.id===attachmentId),target=rows[0];
+                    if(rows.length!==1||!savedHelper.ref(target)||(record.attachments||[]).filter(a=>a?.driveFileId===target.driveFileId).length!==1||
+                        d.attachments.filter(a=>a.id===attachmentId).length!==1||!savedHelper.same(target,d.attachments.find(a=>a.id===attachmentId)))throw Error('Stari, deljeni ili nepoznati prilog nije odobren za uklanjanje.');
+                    const operation={version:1,userId,kind:'remove',operationId:'remove-'+crypto.randomUUID(),targets:[savedHelper.row(target)],baseHash:await savedHelper.hash(record)};
+                    await savedPreflight(userId,id,operation.targets,'remove',current);
+                    if(canonical(journal().draft)!==canonical(d))throw staleDraft();
+                    const intent={userId,id,operation,draftOperationId:d.operationId,expected:d.expected};
+                    mutateJournal(j=>{j.attachmentEdits={...j.attachmentEdits,[savedKey(id)]:intent};});notify();
+                    try{return await resumeSavedRemoval(userId,id,isCurrent,onUnlinked);}
+                    catch(error){
+                        if(error.safeBeforeWrite){const latest=await readMetadata(id,userId,current);if(!latest?._attachmentEdit&&latest?.lastAttachmentOperation?.operationId!==operation.operationId){mutateJournal(j=>{delete j.attachmentEdits[savedKey(id)];});notify();}}
+                        throw error;
+                    }
+                });
+            },
+            async resumeSavedAttachmentEdit({userId,id,isCurrent=()=>true,onUnlinked=()=>{}}) {
+                return lock(()=>resumeSavedRemoval(userId,id,isCurrent,onUnlinked));
+            },
+
             getDeletionHints(userId) { assertUser(userId);return Object.values(journal().deletions||{}).filter(x=>x.userId===userId).map(x=>({...x})); },
             async prepareDeletion({userId,id,mode=null}) {
                 api.assertWriteAllowed(userId);deletionDraft(userId,id);
                 if(mode!==null&&!['app-only','trash'].includes(mode)||!options.metadataStore?.read||!options.metadataStore?.list||!options.metadataStore?.beginDeletion||!options.metadataStore?.deletionProgress||!options.metadataStore?.finishDeletion)throw Error('Bezbedno brisanje nije dostupno.');
                 const record=await options.metadataStore.read(id,userId);assertUser(userId);
                 if(!record){mutateJournal(j=>{if(j.deletions)delete j.deletions[deletionKey(userId,id)];});notify();return {absent:true,id,userId};}
+                if(record._attachmentEdit||savedIntent(id))throw savedUncertain();
                 const old=record._attachmentDeletion?validDeletion(record._attachmentDeletion,userId):null,refs=await hashText(canonical(record.attachments||[]));
                 mode=mode||old?.mode||'app-only';if(mode==='trash'){needToken();if(state!=='connected'||account!==EMAIL)throw Error('Za korpu prvo povežite potvrđeni Drive nalog.');}
                 if(old&&old.refs!==refs)throw Error('Reference priloga su promenjene tokom brisanja. Nema novih Drive zahteva. Sačuvane reference moraju prvo biti usklađene.');
@@ -1100,7 +1373,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         const d = j.draft;
                         if (!d || d.id !== id || d.operationId !== operationId || canonical(d) !== expected) throw new Error('Nacrt se promenio. Odbacivanje je zaustavljeno.');
                         checkDraftRevision(d,expectedRevision);
-                        if (d.sealed) throw new Error('Započeto čuvanje mora prvo da se razreši. Nacrt nije odbačen.');
+                        if (d.sealed||d.attachmentEditPending||savedIntent(d.id)) throw new Error('Zapoceto cuvanje ili izmena priloga mora prvo da se razresi. Nacrt nije odbacen.');
                         queuePhotoCleanup(j,userId,d,'discard');
                         j.discardedDrafts = { ...j.discardedDrafts, [operationId]: true };
                         j.draft = null;
@@ -1134,13 +1407,17 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     mutateJournal(j=>{j.draft.sealed=true;}); d=journal().draft;
                     const valid=()=>draftCurrent(userId,d,{signal,isCurrent}),control={signal,current:valid};
                     valid();const current=await readMetadata(d.id,userId,valid);
+                    if(savedIntent(d.id)?.operation.kind==='remove'||current?._attachmentEdit?.kind==='remove')throw savedUncertain();
                     if(current?._attachmentDeletion){const error=Error('Brisanje ove garancije je započeto. Nacrt je očuvan.');if(await prewriteSafe(d))error.code='DRAFT_CONFLICT_SAFE';throw error;}
-                    if(current?.lastOperation===d.operationId) { await cleanPhotos(userId,d); mutateJournal(j=>{if(j.draft?.operationId===d.operationId)j.draft=null;}); return current.attachments || []; }
+                    if(current?.lastOperation===d.operationId) { await cleanPhotos(userId,d); mutateJournal(j=>{if(j.draft?.operationId===d.operationId)j.draft=null;if(j.attachmentEdits?.[savedKey(d.id)]?.operation.operationId===d.operationId)delete j.attachmentEdits[savedKey(d.id)];}); return current.attachments || []; }
                     if(pendingCommits.get(commitKey(userId,d.operationId))?.pending)throw commitPending();
-                    if(canonical(current)!==d.expected) {
+                    if(current?._attachmentEdit&&(current._attachmentEdit.kind!=='rename'||current._attachmentEdit.operationId!==d.operationId))throw savedUncertain();
+                    const base=current?._attachmentEdit?savedHelper.withoutEdit(current):current;
+                    if(canonical(base)!==d.expected) {
                         const error=Error('Zapis je u međuvremenu promenjen. Nacrt je očuvan; potrebno je usklađivanje bez prepisivanja.');
                         if(await prewriteSafe(d))error.code='DRAFT_CONFLICT_SAFE';throw error;
                     }
+                    await runSavedRename(userId,d,current,valid);
                     const knownIds=new Set((current?.attachments||[]).map(a=>a?.driveFileId).filter(Boolean));
                     if(d.attachments.some(a=>a.driveFileId&&!knownIds.has(a.driveFileId)))throw Error('Nije dozvoljeno dodavanje postojećeg Drive fajla iz drugog zapisa.');
                     const refs=[...d.attachments];
@@ -1165,7 +1442,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     valid();markSavePhase(d,'commit');
                     await commitMetadata({id:d.id,userId,operationId:d.operationId,expected:d.expected,metadata:d.metadata,attachments:refs},valid,signal);valid();
                     await cleanPhotos(userId,d);
-                    mutateJournal(j=>{if(j.draft?.operationId===d.operationId)j.draft=null;});
+                    mutateJournal(j=>{if(j.draft?.operationId===d.operationId)j.draft=null;if(j.attachmentEdits?.[savedKey(d.id)]?.operation.operationId===d.operationId)delete j.attachmentEdits[savedKey(d.id)];});
                     return refs;
                 });
             },
@@ -1818,7 +2095,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             </>;
         }
 
-        function AttachmentList({ attachments, user, onKindChange, onNameChange, onRemovePending, removeDisabled=false, pendingIds=[] }) {
+        function AttachmentList({ attachments, user, onKindChange, onNameChange, onRemovePending, onSavedNameChange, onRemoveSaved, removeDisabled=false, pendingIds=[] }) {
             const [opened, setOpened] = useState(null);
             return <section className="attachment-list space-y-3" aria-label="Prilozi">
                 {attachments.length === 0 && <p className="text-slate-500">Nema priloga.</p>}
@@ -1830,6 +2107,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     {onKindChange && !a.legacy ? <label className="block">Oznaka za {a.name}<select aria-label={"Oznaka za " + a.name} value={a.kind} onChange={e => onKindChange(a.id, e.target.value)} className="block w-full p-2 border rounded-lg">{attachmentKinds.map(kind => <option key={kind}>{kind}</option>)}</select></label> : <p>{a.kind}{a.legacy ? ' · stari inline prilog' : ''}</p>}
                     {onNameChange&&pendingIds.includes(a.id)&&<div><label>Naziv priloga {n+1} (bez ekstenzije)<input type="text" aria-label={'Naziv priloga '+(n+1)} value={attachmentNames.base(a.name,a.mime,a.extension)} onChange={e=>onNameChange(a.id,e.target.value)} autoComplete="off"/></label><p className="small muted">Ekstenzija je zaključana: {a.extension||attachmentNames.extension(a.mime,a.name)}{a.kind==='Ostalo'?' · Slobodan naziv po vašem izboru.':''}</p>{a.nameTruncated&&<p role="status" className="small muted">Automatski predlog je skraćen na 120 znakova. Pregledajte ceo naziv iznad.</p>}{nameError&&<p role="alert" className="error">{nameError}</p>}</div>}
                     {onRemovePending&&pendingIds.includes(a.id)&&!a.legacy&&!a.driveFileId&&!a.storage&&<button type="button" disabled={removeDisabled} aria-label={'Ukloni iz nacrta: '+a.name} onClick={()=>onRemovePending(a.id)} className="danger pending-remove">Ukloni iz nacrta</button>}
+                    {onSavedNameChange&&!a.legacy&&window.garancijeSavedAttachments.ref(a)&&<label>Naziv sacuvanog priloga (primenjuje se na Sacuvaj)<input type="text" value={attachmentNames.base(a.name,a.mime,a.extension)} disabled={removeDisabled} onChange={e=>onSavedNameChange(a.id,e.target.value)}/><span className="small muted">Ekstenzija je zakljucana.</span></label>}
+                    {onRemoveSaved&&!a.legacy&&window.garancijeSavedAttachments.ref(a)&&<button type="button" className="danger" disabled={removeDisabled} onClick={()=>onRemoveSaved(a.id)}>Ukloni prilog</button>}
                     {thumbnail && !a.legacy && <img src={thumbnail} alt={'Izabrano: ' + a.name} className="h-32 max-w-full object-contain" />}
                     <button type="button" aria-label={"Prikaži prilog: " + a.name} disabled={!a.legacy && !a.dataUrl && !a.driveFileId} onClick={() => setOpened(a)} className="attachment-open-button text-blue-700 border rounded-xl px-3 py-2">Prikaži prilog</button>
                 </div>;})}
@@ -1843,7 +2122,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.10.31.2';
+        const RELEASE_VERSION = '2026.11.01.1';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2236,6 +2515,27 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             </section>;
         }
 
+        function SavedAttachmentRecovery({records,user,onOpen}) {
+            const service=window.attachmentService,[,refresh]=useState(0),[busy,setBusy]=useState(false),[error,setError]=useState('');
+            useEffect(()=>service.subscribe(()=>refresh(v=>v+1)),[service]);
+            const rows=records.filter(record=>record._attachmentEdit||service.hasSavedAttachmentEdit(user.uid,record.id));
+            if(!rows.length)return null;
+            const resume=async record=>{
+                if(busy)return;setBusy(true);setError('');
+                try{await service.resumeSavedAttachmentEdit({userId:user.uid,id:record.id});}
+                catch{setError('Operacija nije zavrsena. Proverite Drive vezu i nastavite istu operaciju; ne pravite novu.');}
+                finally{setBusy(false);}
+            };
+            return <section className="notice" aria-label="Nedovrsene izmene priloga"><p>Postoji nedovrsena izmena priloga. Firebase prikaz ne potvrdjuje zavrsetak Drive koraka.</p>
+                {rows.map(record=>{const op=record._attachmentEdit||service.hasSavedAttachmentEdit(user.uid,record.id)?.operation;
+                    return <div key={record.id}><strong>{textValue(record.name)||'Garancija'}</strong>{op?.kind==='rename'
+                        ?<button type="button" disabled={busy} onClick={()=>onOpen(record)}>Otvori i nastavi Sacuvaj</button>
+                        :<button type="button" disabled={busy} onClick={()=>resume(record)}>Nastavi uklanjanje priloga</button>}</div>;})}
+                {error&&<p role="alert">{error}</p>}
+            </section>;
+        }
+
+
         function App() {
             const [warranties, setWarranties] = useState([]);
             const [user, setUser] = useState(null);
@@ -2430,7 +2730,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     <div className="home-screen" hidden={view!=='list'}>
                         <section className="hero"><h1 data-page-heading tabIndex={-1}>Računi i garancije</h1><div className="home-actions"><button type="button" className="primary icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/>Dodaj proizvod</button>{continueDraftLabel&&<button type="button" className="icon-button" disabled={draftActionDisabled} onClick={()=>openForm(null,false,'resume')}><Icon name="arrow-right"/>{continueDraftLabel}</button>}</div></section>
                         {currentDraftStatus==='error'&&draftStatusWarning}
-                        {view==='list'&&<><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail',w);}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije su uklonjene.')}/></>}
+                        {view==='list'&&<><SavedAttachmentRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail',w);}}/><DeletionRecovery records={warranties} user={user} onOpen={w=>{setSelected(w);navigate('detail',w);}}/><DriveConnection compact home/><LocalPhotoCleanup user={user} onComplete={()=>setNotice('Lokalne kopije su uklonjene.')}/></>}
                         <Catalog key={user.uid} records={warranties} user={user} listState={listState} onRetry={()=>setRetry(r=>r+1)} onOpen={w=>{setSelected(w);navigate('detail',w);}}/>
                     </div>
                     {(view==='add'||view==='edit')&&<div className="page-content"><AddForm key={view==='edit'?selected.id:'new'} requireEmptyDraft={newEntry} expectedResume={resumeEntry} initial={view==='edit'?selected:null} onBusy={setFormBusy} onCancel={()=>returnTo(view==='edit'?'detail':'list')} onSave={()=>finishNavigation('list',true)} onDiscard={()=>{setSelected(null);setAuthError('');finishNavigation('list',true);setNotice('Nacrt je odbačen.');}} user={user}/></div>}
@@ -2469,7 +2769,10 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const [stale,setStale]=useState(false),[conflict,setConflict]=useState(null),[choices,setChoices]=useState({}),[resolving,setResolving]=useState(false),[safeConflict,setSafeConflict]=useState(false);
             const recoveryPanel=useRef(null);
             useEffect(()=>{if(stale||conflict)recoveryPanel.current?.focus();},[stale,conflict]);
-            const blocked=()=>staleRef.current||!!conflictRef.current||resolutionRef.current;
+            const initialSavedEdit=service.hasSavedAttachmentEdit(user.uid,initial?.id)||initial?._attachmentEdit;
+            const savedEditPendingRef=useRef(initialSavedEdit?.operation?.kind==='remove'||initialSavedEdit?.kind==='remove'||!!restored.current?.attachmentEditPending);
+            const [savedEditPending,setSavedEditPending]=useState(savedEditPendingRef.current);
+            const blocked=()=>staleRef.current||!!conflictRef.current||resolutionRef.current||savedEditPendingRef.current;
             const markStale=()=>{staleRef.current=true;stageSequence.current++;setStale(true);};
             const handleDraftError=e=>{if(e.code==='DRAFT_STALE')markStale();setError(e.message);};
             const disposed = useRef(false), discardingRef = useRef(false);
@@ -2571,6 +2874,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const allowExit=()=>{
                 if(!mounted.current||window.firebaseDeps?.auth?.currentUser?.uid!==user.uid)return false;
                 if(savingRef.current||discardingRef.current||removingRef.current||resolutionRef.current||cameraAccepting.current||processingRef.current&&!documentFile){setError('Operacija još traje. Povratak nije otkazao čuvanje; sačekajte ishod.');return false;}
+                if(savedEditPendingRef.current)return window.confirm('Uklanjanje priloga nije zavrseno. Napustanje prikaza ga ne ponistava; operacija ostaje za nastavak. Napustiti prikaz?');
                 if(blocked())return window.confirm('Zatvoriti ovaj prikaz konflikta? Nepotvrđene izmene ove kartice biće napuštene; aktuelni nacrt i njegovi prilozi ostaju.');
                 if(sealed)return window.confirm('Ishod čuvanja još nije potvrđen. Nacrt ostaje zaključan za nastavak iste operacije. Napustiti prikaz?');
                 const content=exitContent.current;
@@ -2664,6 +2968,46 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 setAttachments(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
                 setPending(previous => previous.map(a => a.id === id ? { ...a, kind } : a));
             };
+            const syncSavedRemoval=()=>{
+                const d=service.getDraft(user.uid);if(!d||d.id!==initial?.id)throw Error('Nacrt nije dostupan za uskladjivanje.');
+                const base=JSON.parse(d.expected);metadataBase.current=base;acknowledgeDraft(d);
+                setAttachments(d.attachments);
+                setPending(previous=>d.pending.map(meta=>({...previous.find(p=>p.id===meta.id),...meta})));
+                stageAcknowledged.current=null;
+                const active=service.hasSavedAttachmentEdit(user.uid,initial.id)||base._attachmentEdit;
+                savedEditPendingRef.current=active?.operation?.kind==='remove'||active?.kind==='remove'||!!d.attachmentEditPending;
+                setSavedEditPending(savedEditPendingRef.current);
+            };
+            const runSavedRemoval=async(id,resume=false)=>{
+                if(appNavigation.pending||savingRef.current||processingRef.current||removingRef.current||discardingRef.current||stagingRef.current||!initial)return;
+                const target=attachments.find(a=>a.id===id);
+                if(!resume&&(!target||target.legacy||target.storage!=='google-drive'))return;
+                const old=attachmentRefs(metadataBase.current).find(a=>a.id===id);
+                if(!resume&&!window.confirm('Ukloniti prilog "'+(old?.name||target.name)+'" odmah iz garancije, zatim premestiti isti fajl u Drive korpu? Odustani iz forme ne ponistava ovu radnju. Garancija i ostali prilozi ostaju. Nema trajnog brisanja.'))return;
+                removingRef.current=true;setRemoving(true);setImageError('');setRemovalNotice('Proveravam stanje priloga.');
+                const isCurrent=()=>mounted.current&&!disposed.current&&!discardingRef.current&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
+                try{
+                    if(!resume&&stageTask.current&&!await stageTask.current)throw Error('Sacekajte potvrdu lokalnog nacrta pre uklanjanja.');
+                    stageSequence.current++;
+                    const onUnlinked=()=>{if(isCurrent()){syncSavedRemoval();setRemovalNotice('Prilog je uklonjen iz evidencije. Premestanje u Drive korpu jos nije potvrdjeno.');}};
+                    if(resume)await service.resumeSavedAttachmentEdit({userId:user.uid,id:initial.id,isCurrent,onUnlinked});
+                    else await service.removeSavedAttachment({userId:user.uid,id:initial.id,attachmentId:id,expectedRevision:()=>draftRevisionRef.current,
+                        expectedMetadata:form,expectedAttachments:attachments,expectedPending:()=>draftPending.current,isCurrent,onUnlinked});
+                    if(isCurrent()){syncSavedRemoval();setRemovalNotice('Prilog je uklonjen iz garancije i potvrdjen u Drive korpi. Odustani ga ne vraca.');}
+                }catch(e){
+                    if(isCurrent()){
+                        try{syncSavedRemoval();}catch{savedEditPendingRef.current=true;setSavedEditPending(true);}
+                        setImageError(e.message);
+                        if(savedEditPendingRef.current)setRemovalNotice('Operacija nije zavrsena. Referenca je mozda vec uklonjena; Drive korpa jos nije potvrdjena. Koristite Nastavi uklanjanje priloga.');
+                    }
+                }finally{removingRef.current=false;if(mounted.current)setRemoving(false);}
+            };
+            const changeSavedName=(id,value)=>{
+                if(appNavigation.pending||sealed||savingRef.current||removingRef.current||discardingRef.current||blocked())return;
+                setAttachments(previous=>previous.map(a=>a.id===id?{...a,name:value+attachmentNames.extension(a.mime,a.name)}:a));
+            };
+
+
             const changePendingName = (id, value) => {
                 if(appNavigation.pending||sealed||savingRef.current||removingRef.current||disposed.current||discardingRef.current)return;
                 setPending(previous=>previous.map(a=>a.id===id?{...a,name:value+(a.extension||attachmentNames.extension(a.mime,a.name)),nameCustom:true,nameTruncated:false}:a));
@@ -2746,8 +3090,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 try { const data=formMetadata(form,metadataBase.current); if(data.purchasePriceMinor!=null&&!/^[A-Z]{3}$/.test(data.currency||''))throw Error('Uz cenu izaberite valutu od tri velika slova, npr. EUR.'); if(data.currency&&!/^[A-Z]{3}$/.test(data.currency))throw Error('Valuta mora imati tri velika slova.'); if(data.invoiceNumber&&data.invoiceNumber.length>200)throw Error('Broj računa je predugačak.'); if(data.fiscalReceiptUrl)fiscalLink(data.fiscalReceiptUrl); } catch(e){setError(e.message);return;}
                 if (malformedAttachments) { setError('Postojeći podaci o prilozima nisu podržani. Čuvanje je zaustavljeno da bi ostali očuvani.'); return; }
                 if (needsService && !service?.saveWarranty) { setError('Servis priloga nije konfigurisan. Nema čuvanja niti slanja priloga. Unos ostaje u formi.'); return; }
-                let readyPending;
-                try{readyPending=sealed?pending:attachmentNames.validatePending(attachmentNames.prepare(pending,[...legacy,...attachments],form.name));}
+                let readyPending,readyAttachments=attachments;
+                try{readyPending=sealed?pending:attachmentNames.validatePending(attachmentNames.prepare(pending,[...legacy,...attachments],form.name));if(!sealed)readyAttachments=window.garancijeSavedAttachments.prepareNames(metadataBase.current,attachments);}
                 catch(e){setError(e.message);return;}
                 savingRef.current = true; setSaving(true); setError('');
                 try {
@@ -2755,9 +3099,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     const {id, ...base} = initial || {};
                     const data = formMetadata(form, metadataBase.current);
                     service.assertWriteAllowed(user.uid);
-                    await service.stageDraft({userId:user.uid,id:initial?.id||null,base:initial?base:null,metadata:data,attachments,pending:readyPending,operationId:draftOperation.current,expectedPending:()=>draftPending.current,expectedRevision:()=>draftRevisionRef.current,isCurrent:()=>mounted.current&&!disposed.current&&!discardingRef.current&&!blocked(),onStaged:acknowledgeDraft,seal:true,allowSealed:sealed});
+                    await service.stageDraft({userId:user.uid,id:initial?.id||null,base:initial?base:null,metadata:data,attachments:readyAttachments,pending:readyPending,operationId:draftOperation.current,expectedPending:()=>draftPending.current,expectedRevision:()=>draftRevisionRef.current,isCurrent:()=>mounted.current&&!disposed.current&&!discardingRef.current&&!blocked(),onStaged:acknowledgeDraft,seal:true,allowSealed:sealed});
                     if(!mounted.current||disposed.current)return;
-                    setPending(readyPending);setSealed(true);
+                    setAttachments(readyAttachments);setPending(readyPending);setSealed(true);
                     await service.saveWarranty({userId:user.uid,newAttachments:readyPending,operationId:draftOperation.current,expectedRevision:()=>draftRevisionRef.current,isCurrent:()=>mounted.current&&!disposed.current&&!discardingRef.current});
                     if (mounted.current) onSave();
                 } catch (error) {
@@ -2810,7 +3154,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         {conflict.canRebase&&conflict.fields.map(row=><div key={row.key}><strong>{row.label}</strong><p>Moj unos: {conflictValue(row.key,row.local)}</p><p>Noviji zapis: {conflictValue(row.key,row.current)}</p>{row.conflict?<label>Vrednost za {row.label}<select disabled={resolving} value={choices[row.key]||''} onChange={e=>setChoices(old=>({...old,[row.key]:e.target.value}))}><option value="">Izaberite vrednost</option><option value="local">Zadrži moj unos</option><option value="current">Preuzmi iz novijeg zapisa</option></select></label>:<p>Izmene ovog polja mogu bezbedno da se usklade.</p>}</div>)}
                         <div className="row">{conflict.canRebase&&<button type="button" disabled={resolving||conflict.fields.some(f=>f.conflict&&!choices[f.key])} onClick={()=>resolveConflict(false)}>Primeni razrešenje u nacrtu</button>}<button type="button" disabled={resolving} onClick={inspectConflict}>Osveži pregled konflikta</button><button type="button" disabled={resolving} onClick={()=>{conflictRef.current=null;setConflict(null);}}>Zadrži nacrt bez razrešenja</button><button type="button" disabled={resolving} onClick={()=>resolveConflict(true)}>Odbaci samo ovaj lokalni nacrt</button></div>
                     </section>}
-                    <fieldset disabled={navigationPending || saving || discarding || removing || resolving || stale || !!conflict} className="space-y-4">
+                    {savedEditPending&&<section className="notice"><p>Izmena reference/Drive korpa jos nisu potpuno potvrdjeni. Sacuvaj je blokiran da ne vrati uklonjeni prilog.</p><button type="button" disabled={removing||saving||processing} onClick={()=>runSavedRemoval(null,true)}>Nastavi uklanjanje priloga</button><button type="button" disabled={removing||saving} onClick={onCancel}>Zatvori prikaz bez ponistavanja uklanjanja</button></section>}
+                    <fieldset disabled={navigationPending || saving || discarding || removing || resolving || stale || !!conflict || savedEditPending} className="space-y-4">
                         {!initial&&<ReceiptQR disabled={saving||processing||discarding||sealed} isCurrent={qrCurrent} onApply={applyQR}/>}
                         {qrNotice&&<p role="status">{qrNotice}</p>}
                         <section className="form-block"><h2>Podaci o proizvodu</h2><div className="form-grid"><label className="block full">Naziv proizvoda
@@ -2853,7 +3198,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         <details className="small muted"><summary>Granice galerije i nacrt</summary><p>Do 5 slika i 30 MiB po izboru, 10 MiB po novoj slici; do 10 novih galerijskih priloga i 50 MiB njihovih originala uz nacrt. Do 24 megapiksela i 20.000 px po strani. JPEG/PNG proveravamo pre otvaranja; GIF, WebP, BMP i AVIF tek posle dekodiranja. Memorija pregledača time nije garantovano ograničena.</p></details>
                         {pending.some(a=>a.documentPhoto!==true)&&<p className="small muted">Galerija: nacrt pamti podatke i hash, ne i originalne slike. Posle osvežavanja ponovo izaberite iste originale.</p>}
                         {pending.some(a=>a.documentPhoto===true&&a.original)&&<p className="small muted">Dokumenti: potvrđene fotografije imaju lokalnu kopiju uz nacrt. Brisanje podataka sajta može ukloniti te kopije.</p>}
-                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} onRemovePending={sealed?null:removePending} removeDisabled={saving||processing||staging||removing||!!documentFile||blocked()} />
+                        <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} onRemovePending={sealed?null:removePending} onSavedNameChange={sealed?null:changeSavedName} onRemoveSaved={sealed?null:runSavedRemoval} removeDisabled={saving||processing||staging||removing||!!documentFile||blocked()} />
                         {removalNotice&&<p role="status">{removalNotice}</p>}
                         <LocalPhotoCleanup user={user} disabled={saving||processing||staging||removing||sealed||blocked()} onComplete={()=>setRemovalNotice('Lokalna kopija je uklonjena.')}/>
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
@@ -2946,7 +3291,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const service = window.attachmentService;
             const [deleteOpen,setDeleteOpen]=useState(false),deleting=deleteOpen;
             useEffect(()=>{onBusy?.(deleting);return()=>onBusy?.(false);},[deleting,onBusy]);
-            const canDelete=(()=>{try{service.assertWriteAllowed(user?.uid);return true;}catch{return false;}})();
+            const canDelete=(()=>{try{if(item._attachmentEdit||service.hasSavedAttachmentEdit(user?.uid,item.id))return false;service.assertWriteAllowed(user?.uid);return true;}catch{return false;}})();
             const del=()=>{if(canDelete&&!deleteOpen)setDeleteOpen(true);};
             return <section className="page-content">
                 <button type="button" className="quiet back-button" disabled={deleting} onClick={onBack}><Icon name="arrow-left"/>Moja evidencija</button>
@@ -2957,7 +3302,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     ['Prodavnica',textValue(item.store)||'Nije uneta'],['Plaćena cena',Number.isSafeInteger(item.purchasePriceMinor)&&item.purchasePriceMinor>=0?priceText(item.purchasePriceMinor)+' '+textValue(item.currency):'Nije uneta'],['Datum kupovine',fmtDate(parseDate(item.purchaseDate))],['Garancija važi do',fmtDate(exp)],['Osnovna garancija',textValue(String(item.baseMonths??''))+' meseci'],['Produžena garancija',String(item.extendedMonths??0)+' meseci'],['Broj računa',textValue(item.invoiceNumber)||'Nije unet'],['Opis',textValue(item.description)||'Nije unet']
                 ].map(([label,value])=><div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{!exp&&<p role="status" className="notice">Ovaj zapis ima nepotpune ili neispravne podatke. Izmenite ga da biste dobili tačan datum isteka.</p>}
                 {(()=>{try{const link=fiscalLink(item.fiscalReceiptUrl);return <a href={link.url} target="_blank" rel="noopener noreferrer" className="catalog-button inline-block detail-actions">Otvori fiskalni račun</a>;}catch{return null;}})()}</section>
-                <section className="panel"><div className="row spread"><h2>Dokumenti</h2><span className="demo-badge">{window.garancijeAttachmentCounts.display(item)} priloga</span></div><AttachmentList attachments={[...legacyAttachments(item),...attachmentRefs(item)]} user={user}/>{legacyAttachments(item).length>0&&<p className="small muted">Stari inline prilozi su već deo učitanog zapisa; nisu migrirani.</p>}</section></div>
+                <SavedAttachmentRecovery records={[item]} user={user} onOpen={()=>onEdit()}/><section className="panel"><div className="row spread"><h2>Dokumenti</h2><span className="demo-badge">{window.garancijeAttachmentCounts.display(item)} priloga</span></div><AttachmentList attachments={[...legacyAttachments(item),...attachmentRefs(item)]} user={user}/>{legacyAttachments(item).length>0&&<p className="small muted">Stari inline prilozi su već deo učitanog zapisa; nisu migrirani.</p>}</section></div>
                 <div className="row detail-actions"><button type="button" className="danger icon-button" aria-label="Obriši garanciju" disabled={!canDelete||deleting} onClick={del}><Icon name="trash-2"/>{deleting?'Pregled brisanja…':item._attachmentDeletion?'Nastavi brisanje':'Obriši garanciju'}</button></div>
             </section>;
         }

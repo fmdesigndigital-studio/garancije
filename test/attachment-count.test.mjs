@@ -185,3 +185,18 @@ test('actual control and hidden Unicode characters produce unknown name slots',(
  const {count}=harness();for(const value of ['a'+String.fromCharCode(10)+'b.jpg','a'+String.fromCodePoint(0x200b)+'b.jpg'])
   assert.deepEqual(plain(count.names({attachments:[{id:'one',name:value}]})),[null]);
 });
+
+test('saved attachment reservation blocks ordinary metadata commit and names backfill',async()=>{
+ const current={attachments:refs(3),attachmentCount:3,attachmentNames:refs(3).map(a=>a.name),_attachmentEdit:{kind:'remove',operationId:'other'}};
+ const h=harness(current);await assert.rejects(h.store.commit({id:'one',userId:'synthetic-owner',operationId:'save',expected:canonical(current),metadata:{name:'Do not overwrite'},attachments:refs(3),isCurrent:()=>true}),/operacija priloga/);
+ const report=await h.store.backfillAttachmentNames({userId:'synthetic-owner',records:[{id:'one',...current}],isCurrent:()=>true});
+ assert.equal(report.skipped,1);assert.equal(h.writes.length,0);
+});
+test('saved attachment reservation blocks every whole-warranty deletion phase',async()=>{
+ const current={attachments:refs(1),_attachmentEdit:{kind:'remove',operationId:'active'}};
+ const h=harness(current);
+ await assert.rejects(h.store.beginDeletion({id:'one',userId:'synthetic-owner',expected:canonical(current),operation:{}}),/operacija su promenjeni/);
+ await assert.rejects(h.store.deletionProgress({id:'one',userId:'synthetic-owner',operationId:'delete',fileId:'unused'}),/Izmena priloga/);
+ await assert.rejects(h.store.finishDeletion({id:'one',userId:'synthetic-owner',operationId:'delete'}),/Izmena priloga/);
+ assert.equal(h.writes.length,0);
+});
