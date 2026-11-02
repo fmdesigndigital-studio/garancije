@@ -73,6 +73,7 @@ async function harness(config={}){
   if(!u.pathname.startsWith('/drive/v3/files/'))throw Error('UNEXPECTED_SYNTHETIC_ENDPOINT');
   assert.equal(u.searchParams.has('alt'),false,'No content downloads');const id=decodeURIComponent(u.pathname.split('/').at(-1)),file=remote.get(id);
   if(!file||config.getStatus)return new Response('{}',{status:config.getStatus??404});
+  if((init.method??'GET')==='GET'){await config.onMetadata?.();}
   if((init.method??'GET')==='GET')return new Response(JSON.stringify({...file,v:undefined}),{headers:config.noEtag?{}:{etag:'"v'+file.v+'"'}});
   assert.equal(init.method,'PATCH');const patch=JSON.parse(init.body);assert.ok(Object.keys(patch).every(k=>['name','trashed'].includes(k)));
   if(config.patchStatus)return new Response('{}',{status:config.patchStatus});
@@ -426,6 +427,44 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   assert.equal(await archive.count(),1);const toggle=archive.getByRole('button',{name:'Prikaži detalje prenosa'});await toggle.focus();await toggle.press('Enter');assert.equal(await archive.getByRole('button',{name:'Sakrij detalje'}).getAttribute('aria-expanded'),'true');assert.ok((await archive.innerText()).includes('dom-operation'));await archive.getByRole('button',{name:'Sakrij detalje'}).click();await archive.getByRole('button',{name:'Proveri prenos',exact:true}).click();await archive.getByText('Nije pronađen fajl dostupan ovoj aplikaciji.',{exact:false}).waitFor();page.once('dialog',d=>d.accept());await archive.getByRole('button',{name:'Zatvori upozorenje i sačuvaj evidenciju',exact:true}).click();await page.waitForFunction(()=>window.service.getAbandonedDrafts('synthetic-owner')[0].closed===true);assert.equal(await archive.count(),0);assert.ok(await page.evaluate(()=>window.service.getAbandonedDrafts('synthetic-owner')[0].closeAudit));
   assert.equal(requests,0);console.log('DOM discard: sealed missing Blob, confirmation, active draft released, same-ID recovery visible, zero network');
 
+
+  const diagnosticComponent=html.slice(html.indexOf('        function RenameInspection('),html.indexOf('        function DraftForm('));
+  const syntheticRecord=record(),syntheticRemote={id:ref(1).driveFileId,name:ref(1).name,mimeType:ref(1).mime,size:String(ref(1).size),
+   parents:[/products:\s*'([^']+)'/.exec(script)[1]],appProperties:{app:'garancije-pro',operation:'b'.repeat(64),sha256:ref(1).sha256},sha256Checksum:ref(1).sha256,
+   ownedByMe:true,shared:false,permissions:[{type:'user',role:'owner',emailAddress:/const EMAIL = '([^']+)'/.exec(script)[1]}],capabilities:{canRename:true},trashed:false};
+  const diagnosticSetup=[
+   diagnosticComponent,
+   'window.diagRecord='+JSON.stringify(syntheticRecord)+';window.diagFile='+JSON.stringify(syntheticRemote)+';window.diagCalls=[];',
+   "window.diagService=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-diagnostic',storage:localStorage,getUser:()=>window.firebaseDeps.auth.currentUser,metadataStore:{read:async()=>structuredClone(window.diagRecord),list:async()=>[],commit:async()=>{throw Error('COMMIT_FORBIDDEN');}},",
+   "authorize:async()=>({access_token:'synthetic-never-real',expires_in:3600,scope:"+JSON.stringify(/const SCOPE = '([^']+)'/.exec(script)[1])+"}),",
+   "fetch:async(u,init={})=>{if(new URL(u).pathname==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:window.firebaseDeps.auth.currentUser.email}}));window.diagCalls.push(init.method||'GET');if(window.diagHold)await new Promise(r=>window.releaseDiag=r);if((init.method||'GET')!=='GET')throw Error('WRITE_FORBIDDEN');return new Response(JSON.stringify(window.diagFile));}});",
+   "window.attachmentService=window.diagService;",
+   "function DiagnosticFixture(){const [key,setKey]=useState('stable');window.changeDiagnosticKey=setKey;return <fieldset><RenameInspection user={window.firebaseDeps.auth.currentUser} operationId='dom-diagnostic-operation' contentKey={key}/></fieldset>;}",
+   "window.mountDiagnostic=async()=>{await window.diagService.authChanged(window.firebaseDeps.auth.currentUser);await window.diagService.connect();await window.diagService.stageDraft({userId:'synthetic-owner',id:'warranty-one',base:window.diagRecord,metadata:{name:'Synthetic warranty'},attachments:window.diagRecord.attachments.map((a,i)=>i===0?{...a,name:'New-name.jpg'}:a),pending:[],operationId:'dom-diagnostic-operation',expectedRevision:window.diagService.contentRevision(null),seal:true});window.domRoot.render(<DiagnosticFixture/>);};"
+  ].join('\n');
+  await page.addScriptTag({content:babel.transform(diagnosticSetup,{presets:[['react',{runtime:'classic'}]]}).code});
+  await page.evaluate(()=>window.mountDiagnostic());
+  const diagnosticButton=page.getByRole('button',{name:'Proveri preimenovanje - bez čuvanja',exact:true});
+  assert.equal(await diagnosticButton.isEnabled(),true);
+  const journalBefore=await page.evaluate(()=>JSON.stringify(Object.entries(localStorage)));
+  await diagnosticButton.dblclick();
+  await page.getByText('JavaScript vidi ETag (etagReadable)',{exact:true}).waitFor();
+  assert.equal(await page.locator('dl dd').last().innerText(),'Ne');assert.ok((await page.getByRole('region',{name:'Dijagnostika preimenovanja'}).innerText()).includes('nije dokaz'));
+  assert.equal(await page.evaluate(()=>window.diagCalls.length),1);
+  assert.equal(await page.evaluate(()=>JSON.stringify(Object.entries(localStorage))),journalBefore);
+  await page.evaluate(()=>window.diagHold=true);await diagnosticButton.click();
+  await page.waitForFunction(()=>window.diagCalls.length===2,null,{timeout:5000});
+  await page.evaluate(()=>{window.changeDiagnosticKey('edited-while-checking');});
+  await page.waitForTimeout(20);await page.evaluate(()=>window.releaseDiag());
+  await page.waitForFunction(()=>!document.querySelector('[aria-label="Dijagnostika preimenovanja"] button').disabled,null,{timeout:5000});
+  assert.equal(await page.locator('dl').count(),0);
+  await diagnosticButton.click();await page.waitForFunction(()=>window.diagCalls.length===3,null,{timeout:5000});
+  await page.addScriptTag({content:"window.domRoot.render(React.createElement('p',null,'Form closed'));"});await page.waitForTimeout(20);await page.evaluate(()=>window.releaseDiag());await page.waitForTimeout(50);
+  assert.equal(await page.getByRole('region',{name:'Dijagnostika preimenovanja'}).count(),0);
+  assert.equal(await page.evaluate(()=>JSON.stringify(Object.entries(localStorage))),journalBefore);
+  assert.ok(await page.evaluate(()=>window.diagCalls.every(m=>m==='GET')));assert.equal(requests,0);
+  console.log('DOM rename diagnostic: sealed draft, accessible button, sanitized predicates/ETag disclaimer, doubleclick one GET, content-change/unmount discard stale result, byte-identical journal, zero remote writes');
+
  }finally{await browser.close();}
 });
 
@@ -581,4 +620,41 @@ test('double check/close cannot overwrite newer archive; closed uncertain upload
  const archived=h.service.getAbandonedDrafts(h.user.uid)[0],d=await h.service.stageDraft({userId:h.user.uid,base:null,metadata:{name:'New'},attachments:[],pending:archived.pending,operationId:'new-after-close',expectedRevision:h.service.contentRevision(null),seal:true});
  await assert.rejects(h.service.saveWarranty(saveArgs(h,d)),/Drive veza|prvo|nerazresenom|SYNTHETIC|UNEXPECTED/i);
  assert.equal(h.remote.size,0);assert.equal(h.writes.length,0);
+});
+
+const inspectArgs=(h,d,current=()=>true)=>({userId:h.user.uid,operationId:d.operationId,expectedRevision:d.revision,isCurrent:current});
+for(const branch of ['valid','trashed','name-new','name-other','capability-false','capability-missing','etag-missing'])test('read-only rename diagnostic '+branch+' returns sanitized predicates without any journal or remote writes',async()=>{
+ const h=await harness({noEtag:branch==='etag-missing'}),d=await h.stage({attachments:[ref(1,'New-name.jpg'),ref(2)],seal:true}),r=h.remote.get(ref(1).driveFileId);
+ if(branch==='trashed')r.trashed=true;if(branch==='name-new')r.name='New-name.jpg';if(branch==='name-other')r.name='Changed elsewhere.jpg';
+ if(branch==='capability-false')r.capabilities.canRename=false;if(branch==='capability-missing')delete r.capabilities.canRename;
+ const before=JSON.stringify([...h.storage.data]),records=JSON.stringify([...h.records]),remote=JSON.stringify([...h.remote]);
+ const result=clone(await h.service.inspectSavedRename(inspectArgs(h,d)));assert.equal(result.length,1);
+ assert.deepEqual(result[0],{attachmentId:'attachment-1',trashed:branch==='trashed',nameMatchesOld:!['name-new','name-other'].includes(branch),nameMatchesNew:branch==='name-new',canRename:branch==='capability-missing'?null:branch!=='capability-false',etagReadable:branch!=='etag-missing'});
+ assert.equal(JSON.stringify([...h.storage.data]),before);assert.equal(JSON.stringify([...h.records]),records);assert.equal(JSON.stringify([...h.remote]),remote);
+ assert.equal(h.writes.length,0);assert.ok(h.calls.every(x=>x.method==='GET'));assert.equal(h.calls.length,1);
+ assert.ok(!JSON.stringify(result).includes('synthetic-token'));assert.ok(!JSON.stringify(result).includes('"v1"'));
+});
+for(const mode of ['403','404','network','identity'])test('rename diagnostic '+mode+' fails closed without writes or secrets',async()=>{
+ const h=await harness({getStatus:['403','404'].includes(mode)?Number(mode):undefined}),d=await h.stage({attachments:[ref(1,'New-name.jpg'),ref(2)],seal:true});
+ if(mode==='network')h.config.onMetadata=()=>{throw Error('synthetic-token-private-network-error');};
+ if(mode==='identity')h.remote.get(ref(1).driveFileId).sha256Checksum='d'.repeat(64);
+ const before=JSON.stringify([...h.storage.data]);await assert.rejects(h.service.inspectSavedRename(inspectArgs(h,d)),e=>e.code==='DIAGNOSTIC_FAILED'&&!e.message.includes('synthetic-token'));
+ assert.equal(JSON.stringify([...h.storage.data]),before);assert.equal(h.writes.length,0);assert.equal(h.patches().length,0);
+});
+for(const mode of ['owner','revision','attachments','closed','server'])test('rename diagnostic rejects stale '+mode+' before returning result',async()=>{
+ const h=await harness(),d=await h.stage({attachments:[ref(1,'New-name.jpg'),ref(2)],seal:true});let alive=true;
+ h.config.onMetadata=()=>{if(mode==='owner')h.window.firebaseDeps.auth.currentUser={uid:'other'};if(mode==='revision')editJournal(h,j=>j.draft.revision++);if(mode==='attachments')editJournal(h,j=>j.draft.attachments[0].name='Different.jpg');if(mode==='closed')alive=false;if(mode==='server')h.records.get('warranty-one').description='Concurrent';};
+ await assert.rejects(h.service.inspectSavedRename(inspectArgs(h,d,()=>alive)));
+ assert.equal(h.writes.length,0);assert.equal(h.patches().length,0);
+});
+test('double diagnostic click performs one metadata GET and never changes sealed draft',async()=>{
+ const h=await harness(),d=await h.stage({attachments:[ref(1,'New-name.jpg'),ref(2)],seal:true}),args=inspectArgs(h,d),before=JSON.stringify([...h.storage.data]);
+ const results=await Promise.allSettled([h.service.inspectSavedRename(args),h.service.inspectSavedRename(args)]);
+ assert.equal(results.filter(x=>x.status==='fulfilled').length,1);assert.equal(results.find(x=>x.status==='rejected').reason.code,'DIAGNOSTIC_BUSY');
+ assert.equal(h.calls.length,1);assert.equal(JSON.stringify([...h.storage.data]),before);assert.equal(h.writes.length,0);
+});
+test('rename diagnostic checks expected revision and prevents wrong-owner request',async()=>{
+ const h=await harness(),d=await h.stage({attachments:[ref(1,'New-name.jpg'),ref(2)],seal:true});
+ await assert.rejects(h.service.inspectSavedRename({...inspectArgs(h,d),expectedRevision:d.revision+1}),e=>e.code==='DRAFT_STALE');
+ h.window.firebaseDeps.auth.currentUser={uid:'other'};await assert.rejects(h.service.inspectSavedRename(inspectArgs(h,d)));assert.equal(h.calls.length,0);
 });

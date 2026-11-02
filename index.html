@@ -711,6 +711,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
         const waits={oauth:120000,metadata:30000,download:120000,upload:180000,read:30000,commit:60000};
         if(options.simulated&&options.timeouts)for(const key of Object.keys(waits))if(Number.isFinite(options.timeouts[key])&&options.timeouts[key]>0)waits[key]=options.timeouts[key];
         const inFlight=new Set(), pendingCommits=new Map();
+        let renameInspectionBusy=false;
         const operationError=(code,text,uncertain=false)=>Object.assign(Error(text),{code,uncertain});
         const aborted=()=>new DOMException('Čekanje je prekinuto. Nacrt je očuvan.','AbortError');
         // Bound one action, never let an expired Save workflow continue to its next write.
@@ -1506,6 +1507,45 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     return blob;
                 },{ms:waits.download,signal,current:()=>{assertUser(userId);return isCurrent?.()!==false;}});
             },
+            async inspectSavedRename({userId,operationId,expectedRevision,isCurrent=()=>true}) {
+                if(renameInspectionBusy)throw Object.assign(Error('Provera preimenovanja vec traje.'),{code:'DIAGNOSTIC_BUSY'});
+                renameInspectionBusy=true;
+                try{return await lock(async()=>{
+                    assertUser(userId);needToken();
+                    const d=journal().draft;
+                    if(!d||d.operationId!==operationId)throw staleDraft();
+                    checkDraftRevision(d,expectedRevision);
+                    const snapshot=canonical(d),check=()=>{
+                        assertUser(userId);needToken();
+                        if(isCurrent()!==true||canonical(journal().draft)!==snapshot)throw staleDraft();
+                        return true;
+                    };
+                    check();
+                    if(d.attachmentEditPending||savedIntent(d.id)?.operation?.kind==='remove')throw staleDraft();
+                    let base;try{base=JSON.parse(d.expected);}catch{throw staleDraft();}
+                    if(!base)throw Error('Nema sacuvanog priloga za proveru preimenovanja.');
+                    const record=await readMetadata(d.id,userId,check);check();
+                    if(!record||record._attachmentDeletion||(record._attachmentEdit&&(record._attachmentEdit.kind!=='rename'||record._attachmentEdit.operationId!==operationId)))throw staleDraft();
+                    if(canonical(record._attachmentEdit?savedHelper.withoutEdit(record):record)!==d.expected)throw staleDraft();
+                    const targets=savedHelper.renameTargets(base,d.attachments);
+                    if(!targets.length)throw Error('Nema promenjenog naziva sacuvanog priloga.');
+                    const results=[];
+                    for(const row of targets){
+                        const {remote:r,etag}=await savedFile(row,'rename',check);check();
+                        results.push({attachmentId:row.attachmentId,trashed:typeof r.trashed==='boolean'?r.trashed:null,
+                            nameMatchesOld:typeof r.name==='string'?r.name===row.oldName:null,
+                            nameMatchesNew:typeof r.name==='string'?r.name===row.newName:null,
+                            canRename:typeof r.capabilities?.canRename==='boolean'?r.capabilities.canRename:null,
+                            etagReadable:typeof etag==='string'&&etag.length>0});
+                    }
+                    const fresh=await readMetadata(d.id,userId,check);check();
+                    if(canonical(fresh)!==canonical(record))throw staleDraft();
+                    return results;
+                });}catch(e){
+                    if(['DRAFT_STALE','DIAGNOSTIC_BUSY'].includes(e.code))throw e;
+                    throw Object.assign(Error(/403|404/.test(e.message||'')?'Prilog nije dostupan ili dozvoljen (403/404). Dijagnostika nije izvrsena.':'Dijagnostika nije uspela: proverite Drive vezu i neizmenjen identitet priloga. Nista nije sacuvano niti promenjeno.'),{code:'DIAGNOSTIC_FAILED'});
+                }finally{renameInspectionBusy=false;}
+            },
             async saveWarranty({ userId, newAttachments=[], operationId, expectedRevision, signal, isCurrent }) {
                 api.assertWriteAllowed(userId);
                 if(!options.metadataStore?.read || !options.metadataStore?.commit) throw new Error('Čuvanje nije aktivirano. Nacrt je očuvan.');
@@ -2233,7 +2273,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.01.5';
+        const RELEASE_VERSION = '2026.11.02.1';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -2884,6 +2924,27 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return <section role="alert" className="error"><p>Nacrt nije moguće bezbedno otvoriti. {error.message} Sačuvani podaci nisu menjani.</p><button type="button" onClick={props.onCancel}>Nazad na evidenciju</button></section>;
             }
         }
+        function RenameInspection({user,operationId,contentKey,disabled=false}) {
+            const service=window.attachmentService,[,refresh]=useState(0),[busy,setBusy]=useState(false),[answer,setAnswer]=useState(null);
+            const running=useRef(false),alive=useRef(true),latest=useRef('');
+            useEffect(()=>{alive.current=true;const off=service.subscribe(()=>refresh(v=>v+1));return()=>{alive.current=false;off();};},[service]);
+            let draft=null;try{draft=service.getDraft(user.uid);}catch{}
+            const guard=window.garancijeFingerprint({uid:user.uid,operationId,contentKey,disabled,draft});
+            latest.current=guard;
+            const inspect=async()=>{
+                if(running.current||disabled||!draft||draft.operationId!==operationId)return;
+                running.current=true;setBusy(true);setAnswer(null);
+                const captured=guard,current=()=>alive.current&&latest.current===captured&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
+                try{
+                    const rows=await service.inspectSavedRename({userId:user.uid,operationId,expectedRevision:service.contentRevision(draft),isCurrent:current});
+                    if(current())setAnswer({guard:captured,rows});
+                }catch(e){if(current())setAnswer({guard:captured,error:e.message});}
+                finally{running.current=false;if(alive.current)setBusy(false);}
+            };
+            const visible=answer?.guard===guard?answer:null,yesNo=x=>x===true?'Da':x===false?'Ne':'Nepoznato (podatak nedostaje)';
+            return <section className="notice" aria-label="Dijagnostika preimenovanja"><button type="button" style={{minHeight:48}} disabled={disabled||busy||!draft||draft.operationId!==operationId} onClick={inspect}>Proveri preimenovanje - bez čuvanja</button><p>Samo provera: ne menja nacrt, garanciju ili Drive fajl.</p>{busy&&<p role="status">Provera je u toku...</p>}{visible?.error&&<p role="alert">{visible.error}</p>}{visible?.rows&&<div role="status">{visible.rows.map((r,i)=><div key={r.attachmentId}><h3>Prilog {i+1}</h3><dl><dt>U Drive korpi (trashed)</dt><dd>{yesNo(r.trashed)}</dd><dt>Naziv odgovara starom (nameMatchesOld)</dt><dd>{yesNo(r.nameMatchesOld)}</dd><dt>Naziv odgovara novom (nameMatchesNew)</dt><dd>{yesNo(r.nameMatchesNew)}</dd><dt>Drive dozvoljava preimenovanje (canRename)</dt><dd>{yesNo(r.canRename)}</dd><dt>JavaScript vidi ETag (etagReadable)</dt><dd>{yesNo(r.etagReadable)}</dd></dl></div>)}<p>Nečitljiv ETag u JavaScript-u nije dokaz da HTTP odgovor nema ETag. Ova provera ne dokazuje podrsku za If-Match upis i ne menja zastitu od konkurentnih izmena.</p></div>}</section>;
+        }
+
         function DraftForm({ onCancel, onSave, onDiscard, onBusy, user, initial = null, savedDraft }) {
             const service = window.attachmentService;
             const draftConflict = !draftMatchesRecord(savedDraft, initial);
@@ -3328,6 +3389,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         {pending.some(a=>a.documentPhoto!==true)&&<p className="small muted">Galerija: nacrt pamti podatke i hash, ne i originalne slike. Posle osvežavanja ponovo izaberite iste originale.</p>}
                         {pending.some(a=>a.documentPhoto===true&&a.original)&&<p className="small muted">Dokumenti: potvrđene fotografije imaju lokalnu kopiju uz nacrt. Brisanje podataka sajta može ukloniti te kopije.</p>}
                         <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} onRemovePending={sealed?null:removePending} onSavedNameChange={sealed?null:changeSavedName} onRemoveSaved={sealed?null:runSavedRemoval} nameEditDisabled={saving||processing||removing||sealed||!!documentFile||blocked()} removeDisabled={saving||processing||staging||removing||!!documentFile||blocked()} />
+                        {attachments.some(a=>a.storage==='google-drive')&&<RenameInspection user={user} operationId={draftOperation.current} contentKey={stagedContent} disabled={navigationPending||saving||processing||staging||removing||discarding||resolving||stale||!!conflict||savedEditPending}/> }
                         {removalNotice&&<p role="status">{removalNotice}</p>}
                         <LocalPhotoCleanup user={user} disabled={saving||processing||staging||removing||sealed||blocked()} onComplete={()=>setRemovalNotice('Lokalna kopija je uklonjena.')}/>
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
