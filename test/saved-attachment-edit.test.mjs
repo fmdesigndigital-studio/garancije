@@ -51,6 +51,29 @@ async function harness(config={}){
  const uploads=new Map();let generated=0;
  const send=async(url,init={})=>{
   calls.push({url,method:init.method??'GET',body:init.body,headers:init.headers});const u=new URL(url);
+  if(u.pathname.startsWith('/drive/v2/files/')){
+   assert.ok(config.v2Enabled,'V2 is forbidden outside explicit trial tests');const id=decodeURIComponent(u.pathname.split('/').at(-1)),f=remote.get(id);
+   if(!f)return new Response('{}',{status:404});
+   if((init.method??'GET')==='GET'){
+    if(config.v2GetStatus)return new Response('{}',{status:config.v2GetStatus});
+    await config.onV2Get?.(f);
+    const v={...f,title:f.name,version:String(f.v),etag:'"v'+f.v+'"',fileSize:f.size,parents:f.parents.map(id=>({id})),labels:{trashed:f.trashed},
+     properties:Object.entries(f.appProperties).map(([key,value])=>({key,value,visibility:'PRIVATE'}))};
+    if(config.v2NoTag)delete v.etag;if(config.v2WeakTag)v.etag='W/'+v.etag;if(config.v2BadPrivate)v.properties[0].visibility='PUBLIC';
+    return new Response(JSON.stringify(v));
+   }
+   assert.equal(init.method,'PATCH');const body=JSON.parse(init.body);assert.deepEqual(Object.keys(body),['title']);
+   assert.ok([config.v2Old,config.v2New].includes(body.title));const negative=body.title===config.v2Old;
+   if(negative){assert.notEqual(init.headers['If-Match'],'"v'+f.v+'"');if(config.v2NegativeLost){config.v2NegativeLost=false;throw Error('NEGATIVE_RESPONSE_LOST');}
+    if(config.v2NegativeIgnored){f.v++;return new Response(JSON.stringify({id:f.id,title:f.name}),{status:200});}
+    config.onV2Negative?.(f);return new Response('{}',{status:412});
+   }
+   if(config.v2PositiveConflict){f.name='EXTERNAL.jpg';f.v++;}
+   if(init.headers['If-Match']!=='"v'+f.v+'"')return new Response('{}',{status:412});
+   f.name=body.title;f.v++;if(config.v2PositiveLost){config.v2PositiveLost=false;throw Error('POSITIVE_RESPONSE_LOST');}
+   if(config.v2PositiveHang){config.v2PositiveHang=false;return new Promise(()=>{});}
+   return new Response(JSON.stringify({id:f.id,title:f.name}));
+  }
   if(u.pathname==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:user.email}}),{status:200});
   if(config.uploads){
    if(u.pathname==='/drive/v3/files/generateIds')return new Response(JSON.stringify({ids:['synthetic_upload_'+(++generated)]}));
@@ -465,6 +488,32 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   assert.ok(await page.evaluate(()=>window.diagCalls.every(m=>m==='GET')));assert.equal(requests,0);
   console.log('DOM rename diagnostic: sealed draft, accessible button, sanitized predicates/ETag disclaimer, doubleclick one GET, content-change/unmount discard stale result, byte-identical journal, zero remote writes');
 
+
+  const trialComponent=html.slice(html.indexOf('        function V2RenameTrial('),html.indexOf('        function RenameInspection('));
+  const trialRecord=record();trialRecord.name=V2_PIN.name;trialRecord.attachments[0].name=V2_PIN.oldName;trialRecord.attachmentNames=trialRecord.attachments.map(a=>a.name);
+  const trialRemote={...syntheticRemote,name:V2_PIN.oldName,v:1};
+  const trialSetup=[
+   trialComponent,'window.trialRecord='+JSON.stringify(trialRecord)+';window.trialRemote='+JSON.stringify(trialRemote)+';window.trialPatches=[];window.trialSdk=[];',
+   "window.trialService=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-v2-approved',storage:localStorage,getUser:()=>window.firebaseDeps.auth.currentUser,",
+   "metadataStore:{read:async()=>structuredClone(window.trialRecord),list:async()=>[{...structuredClone(window.trialRecord),id:"+JSON.stringify(V2_PIN.id)+"}],",
+   "beginAttachmentEdit:async a=>{if(window.garancijeFingerprint(window.trialRecord)!==a.expected)throw Error('CONFLICT');window.trialSdk.push('reserve');window.trialRecord._attachmentEdit=a.operation;return structuredClone(window.trialRecord);},",
+   "commit:async a=>{if(Object.keys(a.metadata).length)throw Error('UNAPPROVED_METADATA');const base=window.garancijeSavedAttachments.withoutEdit(window.trialRecord);if(window.garancijeFingerprint(base)!==a.expected)throw Error('CONFLICT');window.trialSdk.push('commit');window.trialRecord={...base,attachments:a.attachments,attachmentCount:a.attachments.length,attachmentNames:a.attachments.map(x=>x.name),lastOperation:a.operationId};}},",
+   "authorize:async()=>({access_token:'synthetic-not-real',expires_in:3600,scope:"+JSON.stringify(/const SCOPE = '([^']+)'/.exec(script)[1])+"}),",
+   "fetch:async(u,init={})=>{const p=new URL(u).pathname,f=window.trialRemote;if(p==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:window.firebaseDeps.auth.currentUser.email}}));if(p!=='/drive/v2/files/'+f.id)throw Error('UNAPPROVED_TARGET');if((init.method||'GET')==='GET')return new Response(JSON.stringify({...f,title:f.name,etag:'\"v'+f.v+'\"',version:String(f.v),fileSize:f.size,parents:f.parents.map(id=>({id})),labels:{trashed:false},properties:Object.entries(f.appProperties).map(([key,value])=>({key,value,visibility:'PRIVATE'}))}));if(init.method!=='PATCH')throw Error('UNAPPROVED_METHOD');const b=JSON.parse(init.body);window.trialPatches.push(b);if(init.headers['If-Match']!=='\"v'+f.v+'\"')return new Response('{}',{status:412});f.name=b.title;f.v++;return new Response(JSON.stringify({id:f.id,title:f.name}));}});",
+   "window.attachmentService=window.trialService;",
+   "function TrialFixture(){const [busy,setBusy]=useState(false);return <fieldset disabled={busy}><V2RenameTrial user={window.firebaseDeps.auth.currentUser} operationId='dom-v2-trial' contentKey='fixed-approved' onBusy={setBusy} onComplete={()=>{window.trialCompleted=true;}}/></fieldset>;}",
+   "window.mountTrial=async()=>{await window.trialService.authChanged(window.firebaseDeps.auth.currentUser);await window.trialService.connect();await window.trialService.stageDraft({userId:'synthetic-owner',id:"+JSON.stringify(V2_PIN.id)+",base:window.trialRecord,metadata:{name:'KEEP UNSAVED'},attachments:window.trialRecord.attachments.map((a,i)=>i===0?{...a,name:"+JSON.stringify(V2_PIN.newName)+"}:a),pending:[],operationId:'dom-v2-trial',expectedRevision:window.trialService.contentRevision(null),seal:true});window.domRoot.render(<TrialFixture/>);};"
+  ].join('\n');
+  await page.addScriptTag({content:babel.transform(trialSetup,{presets:[['react',{runtime:'classic'}]]}).code});await page.evaluate(()=>window.mountTrial());
+  const prepare=page.getByRole('button',{name:'Proveri V2 oznaku - bez čuvanja',exact:true}),run=page.getByRole('button',{name:'Pokreni / nastavi odobrenu V2 probu',exact:true});
+  assert.equal(await run.isDisabled(),true);await prepare.click();await page.getByText('V2 validator: dostupan.',{exact:false}).waitFor();
+  assert.equal(await page.evaluate(()=>window.trialPatches.length),0);assert.equal(await page.evaluate(()=>window.trialSdk.length),0);
+  page.once('dialog',d=>d.accept());await run.click();await page.waitForFunction(()=>window.trialCompleted===true,null,{timeout:5000});
+  assert.deepEqual(await page.evaluate(()=>window.trialPatches),[{title:V2_PIN.oldName},{title:V2_PIN.newName}]);assert.deepEqual(await page.evaluate(()=>window.trialSdk),['reserve','commit']);
+  assert.equal(await page.evaluate(()=>window.trialRemote.name),V2_PIN.newName);assert.equal(await page.evaluate(()=>window.trialService.getDraft('synthetic-owner').metadata.name),'KEEP UNSAVED');
+  assert.equal(await page.evaluate(()=>window.trialRecord.attachments[1].name),trialRecord.attachments[1].name);assert.equal(await run.isDisabled(),true);
+  assert.equal(requests,0);console.log('DOM V2 trial: prepare does zero writes; exact pin, explicit confirmation, 412 before valid PATCH, target-only commit, preserved draft; mock proof does not enable general transport');
+
  }finally{await browser.close();}
 });
 
@@ -657,4 +706,84 @@ test('rename diagnostic checks expected revision and prevents wrong-owner reques
  const h=await harness(),d=await h.stage({attachments:[ref(1,'New-name.jpg'),ref(2)],seal:true});
  await assert.rejects(h.service.inspectSavedRename({...inspectArgs(h,d),expectedRevision:d.revision+1}),e=>e.code==='DRAFT_STALE');
  h.window.firebaseDeps.auth.currentUser={uid:'other'};await assert.rejects(h.service.inspectSavedRename(inspectArgs(h,d)));assert.equal(h.calls.length,0);
+});
+
+const V2_PIN={id:'gp-948b6723-c453-43b1-a2fd-fff132902ce9',name:'PROBA- izmana priloga 01',oldName:'Račun-PROBA- preimenovanje.jpg',newName:'Račun-PROBA- preimenovanje - NOVO.jpg'};
+async function v2Harness(config={}){
+ const r=record();r.name=V2_PIN.name;r.attachments[0].name=V2_PIN.oldName;r.attachmentNames=r.attachments.map(a=>a.name);
+ const h=await harness({records:new Map([[V2_PIN.id,r]]),v2Enabled:true,v2Old:V2_PIN.oldName,v2New:V2_PIN.newName,...config});
+ const d=await h.service.stageDraft({userId:h.user.uid,id:V2_PIN.id,base:r,metadata:{name:'UNSAVED local metadata'},attachments:[{...r.attachments[0],name:V2_PIN.newName},r.attachments[1]],pending:[],operationId:'approved-trial-draft',expectedRevision:h.service.contentRevision(null),seal:true});
+ return {...h,d};
+}
+const v2Args=(h,readOnly=false)=>{const d=h.service.getDraft(h.user.uid);return {userId:h.user.uid,operationId:d.operationId,expectedRevision:d.revision,readOnly};};
+test('V2 read-only stage maps JSON metadata with no ETag header and performs zero writes',async()=>{
+ const h=await v2Harness({noEtag:true}),before=JSON.stringify([...h.storage.data]);
+ const result=await h.service.runV2RenameTrial(v2Args(h,true));assert.equal(result.phase,'read_only');assert.equal(result.validatorAvailable,true);assert.equal(result.generalTransportEnabled,false);
+ assert.equal(h.patches().length,0);assert.equal(h.writes.length,0);assert.equal(JSON.stringify([...h.storage.data]),before);
+});
+test('V2 gated 412 then valid conditional rename commits only pinned attachment and preserves other staged metadata',async()=>{
+ const h=await v2Harness({noEtag:true}),before=clone(h.records.get(V2_PIN.id));const r=await h.service.runV2RenameTrial(v2Args(h));
+ assert.equal(r.phase,'complete');assert.equal(r.negativeStatus,412);assert.equal(r.generalTransportEnabled,false);assert.equal(h.patches().length,2);
+ assert.deepEqual(h.patches().map(c=>JSON.parse(c.body)),[{title:V2_PIN.oldName},{title:V2_PIN.newName}]);
+ const record=h.records.get(V2_PIN.id);assert.equal(record.attachments[0].driveFileId,before.attachments[0].driveFileId);assert.equal(record.attachments[0].sha256,before.attachments[0].sha256);
+ assert.equal(record.attachments[0].name,V2_PIN.newName);assert.deepEqual(record.attachments[1],before.attachments[1]);assert.equal(record.attachmentCount,2);assert.equal(record.name,V2_PIN.name);assert.equal(record.untouched,'retain');
+ const d=h.service.getDraft(h.user.uid);assert.equal(d.metadata.name,'UNSAVED local metadata');assert.equal(d.sealed,false);assert.deepEqual(JSON.parse(d.expected),record);
+ await h.service.runV2RenameTrial(v2Args(h));assert.equal(h.patches().length,2);
+});
+for(const bad of ['missing-tag','weak-tag','private','foreign','hash','other-record','wrong-target'])test('V2 trial rejects '+bad+' before any external writes',async()=>{
+ const h=await v2Harness({v2NoTag:bad==='missing-tag',v2WeakTag:bad==='weak-tag',v2BadPrivate:bad==='private'});
+ if(bad==='foreign')h.remote.get(ref(1).driveFileId).ownedByMe=false;
+ if(bad==='hash')h.remote.get(ref(1).driveFileId).sha256Checksum='f'.repeat(64);
+ if(bad==='other-record')editJournal(h,j=>j.draft.id='warranty-one');
+ if(bad==='wrong-target')editJournal(h,j=>j.draft.attachments=[{...j.draft.attachments[0],name:V2_PIN.oldName},{...j.draft.attachments[1],name:'Other-renamed.jpg'}]);
+ await assert.rejects(h.service.runV2RenameTrial(v2Args(h)));assert.equal(h.patches().length,0);assert.equal(h.writes.length,0);
+});
+test('unexpected successful negative probe halts permanently, verifies state and never sends positive or rollback',async()=>{
+ const h=await v2Harness({v2NegativeIgnored:true});await assert.rejects(h.service.runV2RenameTrial(v2Args(h)),/NIJE vratila 412/);
+ assert.equal(h.patches().length,1);assert.equal(h.remote.get(ref(1).driveFileId).name,V2_PIN.oldName);
+ await assert.rejects(h.service.runV2RenameTrial(v2Args(h)),/zaustavljena/);assert.equal(h.patches().length,1);assert.equal(h.records.get(V2_PIN.id).attachments[0].name,V2_PIN.oldName);
+});
+test('negative timeout/lost response never retries and never enables positive',async()=>{
+ const h=await v2Harness({v2NegativeLost:true});await assert.rejects(h.service.runV2RenameTrial(v2Args(h)));
+ await assert.rejects(h.service.runV2RenameTrial(v2Args(h)),/nije dokazan/);assert.equal(h.patches().length,1);assert.equal(h.service.getDraft(h.user.uid).sealed,true);
+});
+for(const fault of ['v2PositiveLost','v2PositiveHang','failRenameCommit','loseRenameCommit'])test('V2 recovery after '+fault+' uses same ID and no duplicate PATCH',async()=>{
+ const h=await v2Harness({[fault]:true});await assert.rejects(h.service.runV2RenameTrial(v2Args(h)));
+ assert.equal(h.remote.get(ref(1).driveFileId).name,V2_PIN.newName);
+ const next=await harness({storage:h.storage,records:h.records,remote:h.remote,v2Enabled:true,v2Old:V2_PIN.oldName,v2New:V2_PIN.newName});
+ const r=await next.service.runV2RenameTrial(v2Args(next));assert.equal(r.phase,'complete');assert.equal(h.patches().length+next.patches().length,2);
+ assert.equal(next.service.getDraft(next.user.uid).metadata.name,'UNSAVED local metadata');
+});
+test('concurrent Drive change returns 412, preserves conflict and never rolls back or commits warranty names',async()=>{
+ const h=await v2Harness({v2PositiveConflict:true});await assert.rejects(h.service.runV2RenameTrial(v2Args(h)),/HTTP 412/);
+ assert.equal(h.remote.get(ref(1).driveFileId).name,'EXTERNAL.jpg');assert.equal(h.records.get(V2_PIN.id).attachments[0].name,V2_PIN.oldName);assert.equal(h.patches().length,2);
+});
+test('V2 write-ahead failure cannot send any PATCH',async()=>{
+ const h=await v2Harness();h.storage.fail=1;await assert.rejects(h.service.runV2RenameTrial(v2Args(h)));assert.equal(h.patches().length,0);assert.equal(h.writes.length,0);
+});
+test('double V2 click and stale identity/revision are fail-closed',async()=>{
+ const h=await v2Harness(),args=v2Args(h);const rs=await Promise.allSettled([h.service.runV2RenameTrial(args),h.service.runV2RenameTrial(args)]);assert.equal(rs.filter(x=>x.status==='fulfilled').length,1);assert.equal(h.patches().length,2);
+ const s=await v2Harness();await assert.rejects(s.service.runV2RenameTrial({...v2Args(s),expectedRevision:s.d.revision+1}));assert.equal(s.calls.length,0);
+ s.config.onV2Get=()=>editJournal(s,j=>j.draft.revision++);await assert.rejects(s.service.runV2RenameTrial(v2Args(s)));assert.equal(s.patches().length,0);
+});
+test('general Save does not use V2 and remains guarded when V3 ETag is missing',async()=>{
+ const h=await harness({noEtag:true}),d=await h.stage({attachments:[ref(1,'New-name.jpg'),ref(2)],seal:true});
+ await assert.rejects(h.service.saveWarranty(saveArgs(h,d)));assert.equal(h.patches().length,0);assert.ok(h.calls.every(c=>!c.url.includes('/drive/v2/')));
+});
+
+for(const status of [403,404])test('V2 metadata HTTP '+status+' makes zero writes',async()=>{
+ const h=await v2Harness({v2GetStatus:status});await assert.rejects(h.service.runV2RenameTrial(v2Args(h)));assert.equal(h.writes.length,0);assert.equal(h.patches().length,0);
+});
+for(const mode of ['closed','owner','file-content'])test('V2 stale '+mode+' during metadata GET prevents probe writes',async()=>{
+ const h=await v2Harness();let alive=true;h.config.onV2Get=f=>{if(mode==='closed')alive=false;if(mode==='owner')h.window.firebaseDeps.auth.currentUser={uid:'other'};if(mode==='file-content')f.sha256Checksum='e'.repeat(64);};
+ await assert.rejects(h.service.runV2RenameTrial({...v2Args(h),isCurrent:()=>alive}));assert.equal(h.patches().length,0);assert.equal(h.writes.length,0);
+});
+test('post-412 external version change prevents positive request',async()=>{
+ const h=await v2Harness({onV2Negative:f=>{f.v++;}});await assert.rejects(h.service.runV2RenameTrial(v2Args(h)),/promenilo/);assert.equal(h.patches().length,1);assert.equal(h.remote.get(ref(1).driveFileId).name,V2_PIN.oldName);
+});
+test('failed local rebase after confirmed commit recovers without repeated external writes',async()=>{
+ const h=await v2Harness(),set=h.storage.setItem.bind(h.storage);h.storage.setItem=(k,v)=>{const j=JSON.parse(v);if(j.draft?.sealed===false&&j.v2Trials?.[h.d.operationId]?.phase==='complete')throw Error('SYNTHETIC_REBASE_FAILURE');set(k,v);};
+ await assert.rejects(h.service.runV2RenameTrial(v2Args(h)));assert.equal(h.records.get(V2_PIN.id).attachments[0].name,V2_PIN.newName);h.storage.setItem=set;
+ const next=await harness({storage:h.storage,records:h.records,remote:h.remote,v2Enabled:true,v2Old:V2_PIN.oldName,v2New:V2_PIN.newName});
+ assert.equal((await next.service.runV2RenameTrial(v2Args(next))).phase,'complete');assert.equal(h.patches().length+next.patches().length,2);assert.equal(next.service.getDraft(next.user.uid).sealed,false);
 });
