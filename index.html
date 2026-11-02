@@ -697,7 +697,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             if (getUser()?.email?.toLowerCase() !== EMAIL || getUser()?.uid !== sessionUid) { disconnect(); throw new Error('Prijavljeni nalog je promenjen. Ponovo povežite Drive.'); }
             needToken();
             const target = new URL(url);
-            if (target.origin !== 'https://www.googleapis.com' || (!/^\/(drive\/v3\/|upload\/drive\/v3\/files)/.test(target.pathname)&&!((v2TrialTarget||textTrialTarget)&&target.pathname==='/drive/v2/files/'+encodeURIComponent(v2TrialTarget||textTrialTarget)&&['GET','PATCH'].includes(init.method||'GET')))) throw new Error('Nedozvoljena Drive adresa.');
+            if (target.origin !== 'https://www.googleapis.com' || (!/^\/(drive\/v3\/|upload\/drive\/v3\/files)/.test(target.pathname)&&!((v2TrialTarget||textTrialTarget||renameTarget)&&target.pathname==='/drive/v2/files/'+encodeURIComponent(v2TrialTarget||textTrialTarget||renameTarget)&&['GET','PATCH'].includes(init.method||'GET')))) throw new Error('Nedozvoljena Drive adresa.');
             if (!checkingAccount && account !== EMAIL) throw new Error('Drive nalog nije potvrđen.');
             const attempt = generation, credential = token;
             const response = await send(url, { ...init, headers: { ...init.headers, Authorization: 'Bearer ' + credential } });
@@ -1037,7 +1037,45 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 !/^\d+$/.test(f.version||'')||!v2StrongTag(f.etag)||![row.oldName,row.newName].includes(f.title))throw Error('V2 identitet, naziv ili jak validator nisu pouzdano potvrdjeni.');
             return {name:f.title,etag:f.etag,version:f.version};
         };
+
+        let renameTarget=null;
+        const renameFile=async(row,current)=>{
+            renameTarget=row.fileId;
+            try{
+                const fields='id,title,etag,mimeType,fileSize,parents(id),properties(key,value,visibility),labels(trashed),ownedByMe,shared,permissions(type,role,emailAddress),capabilities(canRename),sha256Checksum';
+                const f=await ordinaryRequest('https://www.googleapis.com/drive/v2/files/'+encodeURIComponent(row.fileId)+'?fields='+fields,{},json,{current});current();
+                const props={};if(!Array.isArray(f.properties))throw Error('Privatna svojstva priloga nisu potvrdjena.');
+                for(const p of f.properties)if(p.visibility==='PRIVATE'){if(typeof p.key!=='string'||Object.hasOwn(props,p.key))throw Error('Dvosmislena svojstva priloga.');props[p.key]=p.value;}
+                const r={id:f.id,name:f.title,mimeType:f.mimeType,size:f.fileSize,parents:f.parents?.map(p=>p.id),appProperties:props,trashed:f.labels?.trashed,ownedByMe:f.ownedByMe,shared:f.shared,permissions:f.permissions,capabilities:f.capabilities,sha256Checksum:f.sha256Checksum};
+                if(r.id!==row.fileId||r.ownedByMe!==true||r.shared!==false||!Array.isArray(r.permissions)||!r.permissions.length||r.permissions.some(p=>p.type!=='user'||p.role!=='owner'||p.emailAddress?.toLowerCase()!==EMAIL)||
+                    !r.parents?.includes(DRIVE_FOLDERS.products)||props.app!=='garancije-pro'||!/^[a-f0-9]{64}$/.test(props.operation||'')||props.sha256!==row.sha256||r.sha256Checksum?.toLowerCase()!==row.sha256||Number(r.size)!==row.size||r.mimeType!==row.mime)throw Error('Identitet, privatnost ili sadrzaj priloga nisu potvrdjeni.');
+                return {remote:r,etag:v2StrongTag(f.etag)?f.etag:null};
+            }finally{renameTarget=null;}
+        };
+        const renameStep=async(row,current,allowDone,operationId)=>{
+            if(!operationId)throw savedUncertain();
+            const key=operationId+':'+row.fileId,existing=journal().renameWrites?.[key],info=await renameFile(row,current),r=info.remote;
+            if(existing&&canonical(existing.row)!==canonical(row))throw savedUncertain();
+            if(existing&&['conflict','failed'].includes(existing.phase))throw Error('Preimenovanje je zaustavljeno zbog konflikta ili odbijenog zahteva. Nema automatskog ponavljanja.');
+            if(allowDone&&r.name===row.newName&&r.trashed===false)return;
+            if(existing)throw Error('Ishod prethodnog PATCH-a nije potvrdjen. Samo proverite isti ID; novi PATCH nije poslat.');
+            if(r.trashed!==false||r.name!==row.oldName||r.capabilities?.canRename!==true||!info.etag)throw Error('Naziv, dozvola ili V2 validator nisu spremni za preimenovanje.');
+            const put=patch=>{current();mutateJournal(j=>{const live=j.renameWrites?.[key];if(live&&canonical(live.row)!==canonical(row))throw savedUncertain();j.renameWrites={...j.renameWrites,[key]:{row,...live,...patch}};});};
+            put({phase:'sending'});
+            renameTarget=row.fileId;let status;
+            try{
+                status=await ordinaryRequest('https://www.googleapis.com/drive/v2/files/'+encodeURIComponent(row.fileId)+'?fields=id,title',{
+                    method:'PATCH',headers:{'Content-Type':'application/json','If-Match':info.etag},body:JSON.stringify({title:row.newName})
+                },async response=>{await response.arrayBuffer();return response.status;},{current});
+            }catch{throw Object.assign(Error('Odgovor preimenovanja nije potvrdjen. Cita se isti ID; nema ponovnog PATCH-a.'),{uncertain:true});}
+            finally{renameTarget=null;}
+            if(status!==200){put({phase:status===412?'conflict':'failed',status});throw Error('Preimenovanje nije potvrdjeno (HTTP '+status+'). Nema automatskog ponavljanja.');}
+            put({phase:'applied',status});
+            const verified=(await renameFile(row,current)).remote;
+            if(verified.trashed!==false||verified.name!==row.newName)throw savedUncertain();
+        };
         const savedFile=async(row,kind,current)=>{
+            if(kind==='rename')return renameFile(row,current);
             const fields='id,name,mimeType,size,parents,appProperties,trashed,ownedByMe,shared,permissions(type,role,emailAddress),capabilities(canRename,canTrash),sha256Checksum';
             const result=await ordinaryRequest(API+'/files/'+encodeURIComponent(row.fileId)+'?fields='+fields,{},async response=>{
                 if(response.status===403||response.status===404)throw Error('Prilog nije dostupan ili dozvoljen (403/404). Referenca/operacija se ne smatra zavrsenom.');
@@ -1050,7 +1088,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 r.sha256Checksum?.toLowerCase()!==row.sha256.toLowerCase()||Number(r.size)!==row.size||r.mimeType!==row.mime)throw Error('Poreklo, privatnost ili sadrzaj priloga nisu potvrdeni.');
             return result;
         };
-        const savedDriveStep=async(row,kind,current,allowDone)=>{
+        const savedDriveStep=async(row,kind,current,allowDone,operationId)=>{
+            if(kind==='rename')return renameStep(row,current,allowDone,operationId);
             const info=await savedFile(row,kind,current),r=info.remote;
             if(kind==='remove'&&r.trashed===true){if(allowDone)return;throw Error('Prilog je vec u korpi; prvo proverite stanje.');}
             if(kind==='rename'&&r.name===row.newName&&allowDone&&!r.trashed)return;
@@ -1138,7 +1177,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             mutateJournal(j=>{j.attachmentEdits={...j.attachmentEdits,[savedKey(d.id)]:{userId:uid,id:d.id,operation:op,draftOperationId:d.operationId,expected:d.expected}};});
             if(!existing)record=await savedStoreCall('beginAttachmentEdit',{id:d.id,userId:uid,expected:d.expected,operation:op},current);
             markSavePhase(d,'external');
-            for(const row of op.targets){await savedRecordCheck(uid,d.id,op,current);await savedSharedCheck(uid,d.id,op.targets,false,current);await savedDriveStep(row,'rename',current,true);}
+            for(const row of op.targets){await savedRecordCheck(uid,d.id,op,current);await savedSharedCheck(uid,d.id,op.targets,false,current);await savedDriveStep(row,'rename',current,true,op.operationId);}
             return record;
         };
 
@@ -1629,6 +1668,64 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         throw Error(textClean(e.message));
                     }
                 });}finally{textTrialTarget=null;textTrialBusy=false;}
+            },
+            async recoverHaltedRename({userId,operationId,expectedRevision,readOnly=true,finalizeOnly=false,isCurrent=()=>true}) {
+                if(v2TrialBusy)throw Error('Oporavak vec traje.');v2TrialBusy=true;
+                try{return await lock(async()=>{
+                    assertUser(userId);needToken();const d=journal().draft,old=journal().v2Trials?.[operationId];
+                    if(!d||d.operationId!==operationId||d.id!==V2_TRIAL.id||!d.edit||d.pending.length||!old||old.phase!=='halted'||old.reason!=='negative_not_rejected'||old.negativeStatus!==500||old.userId!==userId||old.ownerEmail!==EMAIL||old.id!==d.id)throw staleDraft();
+                    checkDraftRevision(d,expectedRevision);
+                    const snapshot=canonical(d),audit=canonical(old),txt=canonical(journal().textExperiment),row=old.row;
+                    let state=journal().renameRecoveries?.[operationId];
+                    const check=()=>{assertUser(userId);needToken();if(isCurrent()!==true||canonical(journal().draft)!==snapshot||canonical(journal().v2Trials?.[operationId])!==audit||canonical(journal().textExperiment)!==txt)throw staleDraft();return true;};check();
+                    if(row?.oldName!==V2_TRIAL.oldName||row?.newName!==V2_TRIAL.newName||JSON.parse(old.baseExpected)?.name!==V2_TRIAL.name||
+                        canonical(savedHelper.renameTargets(JSON.parse(old.baseExpected),d.attachments))!==canonical([row])||
+                        (!state?.complete&&d.expected!==old.baseExpected))throw staleDraft();
+                    const executionId='v2-'+await hashText(operationId),op={version:1,userId,operationId:executionId,kind:'rename',targets:[row],baseHash:old.baseHash};
+                    savedHelper.valid(op,userId);
+                    if(state&&(state.userId!==userId||state.executionId!==executionId||canonical(state.row)!==canonical(row)||state.oldAuditHash!==await hashText(audit)))throw staleDraft();
+                    if(!state?.complete&&!d.sealed)throw staleDraft();
+                    const refs=JSON.parse(old.baseExpected).attachments.map(a=>a.id===row.attachmentId?{...a,name:row.newName}:a);
+                    const expectedPost={...JSON.parse(old.baseExpected),attachments:refs,attachmentCount:window.garancijeAttachmentCounts.known({...JSON.parse(old.baseExpected),attachments:refs}),attachmentNames:window.garancijeAttachmentCounts.names({...JSON.parse(old.baseExpected),attachments:refs}),lastOperation:executionId};
+                    const server=async()=>{
+                        const r=await readMetadata(d.id,userId,check);check();
+                        if(!r||r.name!==V2_TRIAL.name||r._attachmentDeletion)throw staleDraft();
+                        if(r.lastOperation===executionId&&!r._attachmentEdit){
+                            if(!state||canonical(r)!==canonical(expectedPost))throw staleDraft();
+                        }else if(canonical(savedHelper.valid(r._attachmentEdit,userId))!==canonical(op)||canonical(savedHelper.withoutEdit(r))!==old.baseExpected)throw staleDraft();
+                        return r;
+                    };
+                    let record=await server();await savedSharedCheck(userId,d.id,[row],false,check);
+                    let info=await renameFile(row,check),f=info.remote;
+                    if(f.trashed!==false||![row.oldName,row.newName].includes(f.name)||f.capabilities?.canRename!==true||!info.etag)throw savedUncertain();
+                    const write=journal().renameWrites?.[executionId+':'+row.fileId];
+                    const canFinalize=!!state&&['sending','applied'].includes(write?.phase)&&f.name===row.newName;
+                    if(readOnly)return {phase:state?.phase||'ready',canRun:(!state||state.phase==='prepared')&&f.name===row.oldName,canFinalize,nameMatchesNew:f.name===row.newName,complete:!!state?.complete,oldNegativeStatus:old.negativeStatus};
+                    const put=patch=>{check();mutateJournal(j=>{if(canonical(j.renameRecoveries?.[operationId])!==canonical(state))throw staleDraft();state={...state,...patch};j.renameRecoveries={...j.renameRecoveries,[operationId]:state};});if(canonical(journal().renameRecoveries?.[operationId])!==canonical(state))throw savedUncertain();};
+                    if(state?.complete){if(canonical(record)!==d.expected)throw staleDraft();return {phase:'complete',complete:true,oldNegativeStatus:500};}
+                    if(!state){if(finalizeOnly||f.name!==row.oldName)throw staleDraft();put({version:1,userId,oldOperationId:operationId,executionId,oldAuditHash:await hashText(audit),row,phase:'prepared'});}
+                    if(finalizeOnly){if(!canFinalize)throw Error('Prvo samo procitajte isti ID i potvrdite izvrsenu promenu. Novi PATCH nije dozvoljen.');}
+                    else{
+                        if(state.phase!=='prepared')throw Error('Prethodni ishod prvo proverite readonly dugmetom. PATCH se ne ponavlja.');
+                        put({phase:'drive_sending'});
+                        await savedRecordCheck(userId,d.id,op,check);await renameStep(row,check,false,executionId);
+                        put({phase:'drive_confirmed'});
+                    }
+                    record=await server();f=(await renameFile(row,check)).remote;
+                    if(f.trashed!==false||f.name!==row.newName)throw savedUncertain();
+                    if(record.lastOperation!==executionId){
+                        put({phase:'commit_sending'});
+                        await commitMetadata({id:d.id,userId,operationId:executionId,expected:old.baseExpected,metadata:{},attachments:refs},check);
+                    }
+                    record=await server();f=(await renameFile(row,check)).remote;
+                    if(canonical(record)!==canonical(expectedPost)||f.trashed!==false||f.name!==row.newName)throw savedUncertain();
+                    check();mutateJournal(j=>{
+                        if(canonical(j.renameRecoveries?.[operationId])!==canonical(state))throw staleDraft();
+                        j.renameRecoveries[operationId]={...state,phase:'complete',complete:true,completedAt:new Date(now()).toISOString()};
+                        j.draft={...d,expected:canonical(record),sealed:false,saveState:null,revision:nextDraftRevision(d)};
+                        if(j.attachmentEdits?.[savedKey(d.id)]?.operation.operationId===executionId)delete j.attachmentEdits[savedKey(d.id)];
+                    });notify();return {phase:'complete',complete:true,nameMatchesNew:true,oldNegativeStatus:500};
+                });}finally{v2TrialBusy=false;renameTarget=null;}
             },
             async runV2RenameTrial({userId,operationId,expectedRevision,readOnly=true,isCurrent=()=>true}) {
                 if(v2TrialBusy)throw Object.assign(Error('V2 proba vec traje.'),{code:'TRIAL_BUSY'});
@@ -2486,7 +2583,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.02.3';
+        const RELEASE_VERSION = '2026.11.02.4';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -3154,6 +3251,27 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             return <section className="notice" aria-label="Izolovana TXT provera"><h2>Izolovana TXT provera konkurentnih izmena</h2><p>Jedan bezazleni Drive fajl, bez zapisa garancije. Prethodni halted pokusaj i nacrt se ne menjaju. Ovaj test ne ukljucuje opsti V2 transport.</p><button type="button" style={{minHeight:48}} disabled={disabled||busy||!!s} onClick={()=>perform('start')}>Pokreni izolovanu TXT proveru</button>{s&&<><p role="status">Faza: {s.phase}. File ID: {s.fileId||'nije potvrdjen'}. E0: {s.e0Available?'sacuvan':'nije potvrdjen'}. E1 razlicit: {s.e1Different?'Da':'nije potvrdjeno'}. Poslednji provereni naziv: {s.observedName||'nije procitan'}. Rezultat zastarelog E0: {s.negativeStatus??'nije potvrdjen'}. {s.passed?'PROLAZ: 412 i naziv B potvrdjeni.':'Nema dokaza prolaza.'}</p><table><caption>Sacuvani HTTP nalazi</caption><thead><tr><th>Korak</th><th>HTTP</th><th>Kod</th><th>Razlog</th><th>Poruka</th></tr></thead><tbody>{s.events.map((e,i)=><tr key={i}><td>{e.label}</td><td>{e.status??'neizvesno'}</td><td>{e.errorCode??'—'}</td><td>{e.reason||'—'}</td><td>{e.message||'—'}</td></tr>)}</tbody></table>{s.uncertain&&<p role="alert">Ishod zahteva nije potvrdjen. Nema ponovnog kreiranja/PATCH-a ili korpe. Dozvoljeno je samo citanje istog ID-a.</p>}{s.failure&&<p role="alert">{s.failure}</p>}<button type="button" style={{minHeight:48}} disabled={disabled||busy||!s.fileId} onClick={()=>perform('inspect')}>Procitaj stanje istog TXT fajla - bez izmene</button><button type="button" style={{minHeight:48}} disabled={disabled||busy||!s.terminal} onClick={()=>setViewed(s.revision)}>Procitao sam rezultat</button><button type="button" style={{minHeight:48}} disabled={disabled||busy||!s.fileId||!s.terminal||s.inFlight||s.uncertain||viewed!==s.revision||s.observedTrashed} onClick={()=>perform('trash')}>Premesti samo probni TXT fajl u korpu</button></>}{busy&&<p role="status">Zahtev je u toku...</p>}{error&&<p role="alert">{error}</p>}</section>;
         }
 
+        function HaltedRenameRecovery({user,operationId,contentKey,disabled=false,onBusy,onComplete}) {
+            const service=window.attachmentService,[busy,setBusy]=useState(false),[info,setInfo]=useState(null),[error,setError]=useState(''),running=useRef(false),alive=useRef(true),latest=useRef('');
+            useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
+            const guard=window.garancijeFingerprint({uid:user.uid,operationId,contentKey,disabled});latest.current=guard;
+            let show=false;try{show=service.getDraft(user.uid)?.id==='gp-948b6723-c453-43b1-a2fd-fff132902ce9';}catch{}
+            const act=async readOnly=>{
+                if(running.current||disabled)return;
+                const shown=info?.guard===guard?info:null;
+                if(!readOnly&&!window.confirm('Dovrsiti samo preimenovanje prvog priloga odobrene testne garancije u Račun-PROBA- preimenovanje - NOVO.jpg? Stari halted audit ostaje. Ostala polja i nesacuvane izmene se ne prepisuju. Posle prekida nema slepog PATCH ponavljanja.'))return;
+                running.current=true;setBusy(true);setError('');if(!readOnly)setInfo(null);onBusy?.(true);
+                const captured=guard,current=()=>alive.current&&latest.current===captured&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
+                try{
+                    const d=service.getDraft(user.uid),r=await service.recoverHaltedRename({userId:user.uid,operationId,expectedRevision:service.contentRevision(d),readOnly,finalizeOnly:!readOnly&&!!shown?.canFinalize,isCurrent:current});
+                    if(current()){setInfo({guard:captured,...r});if(r.complete&&!readOnly)await onComplete?.();}
+                }catch(e){if(current()){setInfo(null);setError(e.message);}}
+                finally{running.current=false;onBusy?.(false);if(alive.current)setBusy(false);}
+            };
+            if(!show)return null;const shown=info?.guard===guard?info:null;
+            return <section className="notice" aria-label="Oporavak starog preimenovanja"><h3>Bezbedan oporavak blokiranog preimenovanja</h3><p>Samo dogovoreni prvi prilog testne garancije. Stara negativna proba sa HTTP 500 ostaje zabelezena; ne ponavlja se.</p><button type="button" style={{minHeight:48}} disabled={disabled||busy} onClick={()=>act(true)}>Proveri stanje oporavka - bez čuvanja</button>{shown&&<p role="status">Faza: {shown.phase}. Naziv odgovara novom: {shown.nameMatchesNew?'Da':'Ne'}. Stari audit: HTTP {shown.oldNegativeStatus}.</p>}<button type="button" style={{minHeight:48}} disabled={disabled||busy||!shown||shown.complete||!shown.canRun&&!shown.canFinalize} onClick={()=>act(false)}>{shown?.canFinalize?'Uskladi potvrđen naziv - bez novog PATCH-a':'Dovrši preimenovanje testnog priloga'}</button>{busy&&<p role="status">Oporavak je u toku...</p>}{error&&<p role="alert">{error}</p>}</section>;
+        }
+
         function V2RenameTrial({user,operationId,contentKey,disabled=false,onBusy,onComplete}) {
             const service=window.attachmentService,[busy,setBusy]=useState(false),[info,setInfo]=useState(null),[error,setError]=useState(''),alive=useRef(true),running=useRef(false),latest=useRef('');
             useEffect(()=>{alive.current=true;return()=>{alive.current=false;};},[]);
@@ -3171,7 +3289,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             };
             if(!eligible)return null;
             const shown=info?.guard===guard?info:null;
-            return <section className="notice" aria-label="Odobrena V2 proba"><h3>Ogranicena V2 proba testnog priloga</h3><p>Opsti transport preimenovanja nije ukljucen. Samo odobrena testna garancija i njen tacan prvi prilog mogu biti predmet ove probe.</p><button type="button" style={{minHeight:48}} disabled={disabled||busy} onClick={()=>act(true)}>Proveri V2 oznaku - bez čuvanja</button>{shown&&<p role="status">V2 validator: {shown.validatorAvailable?'dostupan':'nije dostupan'}. Faza: {shown.phase}. Negativni HTTP rezultat: {shown.negativeStatus??'jos nije izvrsen'}. Naziv odgovara novom: {shown.nameMatchesNew?'Da':'Ne'}.</p>}<button type="button" style={{minHeight:48}} disabled={disabled||busy||!shown||shown.phase==='halted'||shown.phase==='complete'} onClick={()=>act(false)}>Pokreni / nastavi odobrenu V2 probu</button>{busy&&<p role="status">Proba je u toku. Ne pokrecite druge radnje.</p>}{error&&<p role="alert">{error}</p>}<p>Ako odgovor nije potvrdjen, isti dnevnik i ID ostaju za oporavak. Nema automatskog ponavljanja PATCH-a, vracanja naziva ili brisanja fajla.</p></section>;
+            return <section className="notice" aria-label="Odobrena V2 proba"><h3>Ogranicena V2 proba testnog priloga</h3><p>Istorijska V2 proba. Ponovno pokretanje ove probe je iskljuceno; sacuvani nalaz ostaje vidljiv. Za blokirani nacrt koristite poseban bezbedan oporavak ispod.</p><button type="button" style={{minHeight:48}} disabled={disabled||busy} onClick={()=>act(true)}>Proveri V2 oznaku - bez čuvanja</button>{shown&&<p role="status">V2 validator: {shown.validatorAvailable?'dostupan':'nije dostupan'}. Faza: {shown.phase}. Negativni HTTP rezultat: {shown.negativeStatus??'jos nije izvrsen'}. Naziv odgovara novom: {shown.nameMatchesNew?'Da':'Ne'}.</p>}<button type="button" style={{minHeight:48}} disabled={true} onClick={()=>act(false)}>Pokreni / nastavi odobrenu V2 probu</button>{busy&&<p role="status">Proba je u toku. Ne pokrecite druge radnje.</p>}{error&&<p role="alert">{error}</p>}<p>Ako odgovor nije potvrdjen, isti dnevnik i ID ostaju za oporavak. Nema automatskog ponavljanja PATCH-a, vracanja naziva ili brisanja fajla.</p></section>;
         }
 
         function RenameInspection({user,operationId,contentKey,disabled=false}) {
@@ -3642,6 +3760,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} onRemovePending={sealed?null:removePending} onSavedNameChange={sealed?null:changeSavedName} onRemoveSaved={sealed?null:runSavedRemoval} nameEditDisabled={saving||processing||removing||sealed||!!documentFile||blocked()} removeDisabled={saving||processing||staging||removing||!!documentFile||blocked()} />
                         {attachments.some(a=>a.storage==='google-drive')&&<RenameInspection user={user} operationId={draftOperation.current} contentKey={stagedContent} disabled={navigationPending||saving||processing||staging||removing||discarding||resolving||stale||!!conflict||savedEditPending}/> }
                         <V2RenameTrial user={user} operationId={draftOperation.current} contentKey={stagedContent} disabled={navigationPending||saving||processing||staging||removing||discarding||resolving||stale||!!conflict||savedEditPending} onBusy={value=>{v2BusyRef.current=value;setV2Busy(value);}} onComplete={async()=>{await applyLoadedDraft(service.getDraft(user.uid));}}/>
+                        <HaltedRenameRecovery user={user} operationId={draftOperation.current} contentKey={stagedContent} disabled={navigationPending||saving||processing||staging||removing||discarding||resolving||stale||!!conflict||savedEditPending} onBusy={value=>{v2BusyRef.current=value;setV2Busy(value);}} onComplete={async()=>{await applyLoadedDraft(service.getDraft(user.uid));}}/>
                         <TextConcurrencyTrial user={user} disabled={navigationPending||saving||processing||staging||removing||discarding||resolving||stale||!!conflict} onBusy={value=>{v2BusyRef.current=value;setV2Busy(value);}}/>
                         {removalNotice&&<p role="status">{removalNotice}</p>}
                         <LocalPhotoCleanup user={user} disabled={saving||processing||staging||removing||sealed||blocked()} onComplete={()=>setRemovalNotice('Lokalna kopija je uklonjena.')}/>
