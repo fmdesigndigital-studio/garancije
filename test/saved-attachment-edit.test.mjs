@@ -51,6 +51,37 @@ async function harness(config={}){
  const uploads=new Map();let generated=0;
  const send=async(url,init={})=>{
   calls.push({url,method:init.method??'GET',body:init.body,headers:init.headers});const u=new URL(url);
+  if(config.txtEnabled){
+   if(u.pathname==='/drive/v3/files/generateIds'){if(config.txtIdLost)throw Error('ID_RESPONSE_LOST');return new Response(JSON.stringify({ids:['synthetic_txt_'+(++generated)]}));}
+   if(u.pathname==='/upload/drive/v3/files'){
+    assert.equal(init.method,'POST');assert.equal(u.searchParams.get('uploadType'),'multipart');
+    const raw=await init.body.text(),boundary=init.body.type.split('boundary=')[1],parts=raw.split('--'+boundary);
+    const meta=JSON.parse(parts[1].split('\r\n\r\n')[1].replace(/\r\n$/,'')),content=parts[2].split('\r\n\r\n')[1].replace(/\r\n$/,'');
+    const hash=Buffer.from(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(content))).toString('hex');
+    assert.equal(meta.appProperties.sha256,hash);assert.equal(meta.name,'GP-provera-A.txt');assert.equal(meta.mimeType,'text/plain');assert.ok(!remote.has(meta.id));
+    remote.set(meta.id,{...meta,size:String(new TextEncoder().encode(content).length),sha256Checksum:hash,ownedByMe:true,shared:false,permissions:[{type:'user',role:'owner',emailAddress:user.email}],capabilities:{canRename:true,canTrash:true},trashed:false,v:1});
+    if(config.txtCreateLost)throw Error('CREATE_RESPONSE_LOST');
+    return new Response(JSON.stringify({id:meta.id}));
+   }
+   if(u.pathname.startsWith('/drive/v2/files/')){
+    const id=decodeURIComponent(u.pathname.split('/').at(-1)),f=remote.get(id);assert.ok(id.startsWith('synthetic_txt_'),'No existing file may be touched');
+    if(!f)return new Response('{}',{status:404});
+    if((init.method||'GET')==='GET'){
+     await config.onTxtGet?.(f);
+     const data={...f,title:f.name,fileSize:f.size,version:String(f.v),etag:config.txtWeakTag?'W/"weak"':config.txtEqualTag?'"v1"':'"v'+f.v+'"',
+      labels:{trashed:f.trashed},parents:f.parents.map(id=>({id})),properties:Object.entries(f.appProperties).map(([key,value])=>({key,value,visibility:'PRIVATE'}))};
+     if(config.txtMissingTag)delete data.etag;return new Response(JSON.stringify(data));
+    }
+    assert.equal(init.method,'PATCH');const b=JSON.parse(init.body);
+    if(b.labels){assert.deepEqual(b,{labels:{trashed:true}});assert.equal(init.headers['If-Match'],'"v'+f.v+'"');f.trashed=true;f.v++;if(config.txtTrashLost)throw Error('TRASH_RESPONSE_LOST');return new Response(JSON.stringify({id:f.id,title:f.name}));}
+    assert.ok(['GP-provera-B.txt','GP-provera-C.txt'].includes(b.title));assert.deepEqual(Object.keys(b),['title']);
+    const stale=b.title==='GP-provera-C.txt';assert.equal(init.headers['If-Match'],'"v1"');assert.equal(f.name,stale?'GP-provera-B.txt':'GP-provera-A.txt');
+    const status=stale?(config.txtStaleStatus??412):(config.txtValidStatus??200);
+    if(status===200){f.name=b.title;f.v++;}
+    if(stale&&config.txtStaleLost||!stale&&config.txtValidLost)throw Error('PATCH_RESPONSE_LOST');
+    return new Response(JSON.stringify(status>=400?{error:{code:status,errors:[{reason:status===412?'conditionNotMet':'backendError'}],message:config.txtErrorMessage||'Backend Error'}}:{id:f.id,title:f.name}),{status});
+   }
+  }
   if(u.pathname.startsWith('/drive/v2/files/')){
    assert.ok(config.v2Enabled,'V2 is forbidden outside explicit trial tests');const id=decodeURIComponent(u.pathname.split('/').at(-1)),f=remote.get(id);
    if(!f)return new Response('{}',{status:404});
@@ -514,6 +545,31 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   assert.equal(await page.evaluate(()=>window.trialRecord.attachments[1].name),trialRecord.attachments[1].name);assert.equal(await run.isDisabled(),true);
   assert.equal(requests,0);console.log('DOM V2 trial: prepare does zero writes; exact pin, explicit confirmation, 412 before valid PATCH, target-only commit, preserved draft; mock proof does not enable general transport');
 
+
+  const textComponent=html.slice(html.indexOf('        function TextConcurrencyTrial('),html.indexOf('        function V2RenameTrial('));
+  const folderObject=vm.runInNewContext('('+/const DRIVE_FOLDERS = (\{[^;]+\});/.exec(script)[1]+')');
+  const textSetup=[
+   textComponent,'window.txtFolders='+JSON.stringify(folderObject)+';window.txtCreates=0;window.txtPatches=[];window.txtRemote=null;',
+   "window.txtService=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-txt-dom',storage:localStorage,getUser:()=>window.firebaseDeps.auth.currentUser,metadataStore:{read:async()=>{throw Error('FIREBASE_FORBIDDEN');},commit:async()=>{throw Error('FIREBASE_FORBIDDEN');}},",
+   "authorize:async()=>({access_token:'synthetic-txt-only',expires_in:3600,scope:"+JSON.stringify(/const SCOPE = '([^']+)'/.exec(script)[1])+"}),",
+   "fetch:async(u,init={})=>{const p=new URL(u).pathname,user=window.firebaseDeps.auth.currentUser,permissions=[{type:'user',role:'owner',emailAddress:user.email}];if(p==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:user.email}}));const kind=Object.keys(window.txtFolders).find(k=>p.endsWith('/'+window.txtFolders[k]));if(kind)return new Response(JSON.stringify({id:window.txtFolders[kind],name:{root:'baza-garancije-i-racuni',products:'proizvodi',backups:'rezervne-kopije'}[kind],mimeType:'application/vnd.google-apps.folder',ownedByMe:true,parents:kind==='root'?[]:[window.txtFolders.root],permissions}));",
+   "if(p==='/drive/v3/files/generateIds')return new Response(JSON.stringify({ids:['synthetic_txt_dom_01']}));if(p==='/upload/drive/v3/files'){window.txtCreates++;if(window.txtCreates!==1)throw Error('DUPLICATE');const raw=await init.body.text(),parts=raw.split('--'+init.body.type.split('boundary=')[1]),m=JSON.parse(parts[1].split('\\r\\n\\r\\n')[1].replace(/\\r\\n$/,'')),content=parts[2].split('\\r\\n\\r\\n')[1].replace(/\\r\\n$/,'');window.txtRemote={...m,size:String(new TextEncoder().encode(content).length),sha256Checksum:m.appProperties.sha256,v:1,trashed:false};return new Response(JSON.stringify({id:m.id}));}",
+   "const f=window.txtRemote;if(!f||p!=='/drive/v2/files/'+f.id)throw Error('UNAPPROVED_TARGET');if((init.method||'GET')==='GET')return new Response(JSON.stringify({...f,title:f.name,fileSize:f.size,etag:'\"v'+f.v+'\"',version:String(f.v),ownedByMe:true,shared:false,permissions,capabilities:{canRename:true,canTrash:true},labels:{trashed:f.trashed},parents:f.parents.map(id=>({id})),properties:Object.entries(f.appProperties).map(([key,value])=>({key,value,visibility:'PRIVATE'}))}));if(init.method!=='PATCH')throw Error('UNAPPROVED_METHOD');const b=JSON.parse(init.body);window.txtPatches.push(b);if(init.headers['If-Match']!=='\"v'+f.v+'\"')return new Response(JSON.stringify({error:{code:412,errors:[{reason:'conditionNotMet'}],message:'Precondition Failed'}}),{status:412});if(b.title)f.name=b.title;else f.trashed=true;f.v++;return new Response(JSON.stringify({id:f.id,title:f.name}));}});",
+   "window.attachmentService=window.txtService;function TextFixture(){const [busy,setBusy]=useState(false);return <fieldset disabled={busy}><TextConcurrencyTrial user={window.firebaseDeps.auth.currentUser} onBusy={setBusy}/></fieldset>;}",
+   "window.mountText=async()=>{await window.txtService.authChanged(window.firebaseDeps.auth.currentUser);await window.txtService.connect();await window.txtService.stageDraft({userId:'synthetic-owner',base:null,metadata:{name:'KEEP OLD DRAFT'},attachments:[],pending:[],operationId:'unrelated-old-draft',expectedRevision:window.txtService.contentRevision(null),seal:true});const key=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom'));const j=JSON.parse(localStorage.getItem(key));j.v2Trials={old:{phase:'halted',negativeStatus:500}};localStorage.setItem(key,JSON.stringify(j));window.txtUntouched=JSON.stringify({draft:j.draft,v2Trials:j.v2Trials});window.domRoot.render(<TextFixture/>);};"
+  ].join('\n');
+  await page.addScriptTag({content:babel.transform(textSetup,{presets:[['react',{runtime:'classic'}]]}).code});await page.evaluate(()=>window.mountText());
+  const textRegion=page.getByRole('region',{name:'Izolovana TXT provera'}),startText=textRegion.getByRole('button',{name:'Pokreni izolovanu TXT proveru',exact:true});
+  page.once('dialog',d=>d.accept());await startText.click();await page.waitForFunction(()=>window.txtService.getTextTrial('synthetic-owner')?.phase==='passed',null,{timeout:5000});
+  assert.equal(await startText.isDisabled(),true);assert.equal(await page.evaluate(()=>window.txtCreates),1);assert.deepEqual(await page.evaluate(()=>window.txtPatches),[{title:'GP-provera-B.txt'},{title:'GP-provera-C.txt'}]);
+  assert.ok((await textRegion.innerText()).includes('412'));const trashText=textRegion.getByRole('button',{name:'Premesti samo probni TXT fajl u korpu',exact:true});assert.equal(await trashText.isDisabled(),true);
+  await textRegion.getByRole('button',{name:'Procitaj stanje istog TXT fajla - bez izmene',exact:true}).click();assert.equal(await page.evaluate(()=>window.txtCreates),1);assert.equal(await page.evaluate(()=>window.txtPatches.length),2);
+  await textRegion.getByRole('button',{name:'Procitao sam rezultat',exact:true}).click();assert.equal(await trashText.isEnabled(),true);
+  page.once('dialog',d=>d.accept());await trashText.click();await page.waitForFunction(()=>window.txtService.getTextTrial('synthetic-owner')?.phase==='trashed',null,{timeout:5000});
+  assert.equal(await page.evaluate(()=>window.txtRemote.trashed),true);assert.equal(await page.evaluate(()=>window.txtCreates),1);
+  assert.equal(await page.evaluate(()=>{const key=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom')),j=JSON.parse(localStorage.getItem(key));return JSON.stringify({draft:j.draft,v2Trials:j.v2Trials})===window.txtUntouched;}),true);
+  assert.equal(requests,0);console.log('DOM TXT: one file, A->B->stale C gives 412, visible phase results, readonly inspect, explicit read acknowledgement before exact-ID trash, old draft/halted unchanged, no Firebase');
+
  }finally{await browser.close();}
 });
 
@@ -787,3 +843,83 @@ test('failed local rebase after confirmed commit recovers without repeated exter
  const next=await harness({storage:h.storage,records:h.records,remote:h.remote,v2Enabled:true,v2Old:V2_PIN.oldName,v2New:V2_PIN.newName});
  assert.equal((await next.service.runV2RenameTrial(v2Args(next))).phase,'complete');assert.equal(h.patches().length+next.patches().length,2);assert.equal(next.service.getDraft(next.user.uid).sealed,false);
 });
+
+async function txtHarness(config={}){
+ const h=await harness({uploads:true,txtEnabled:true,...config});await h.stage({seal:true});
+ editJournal(h,j=>j.v2Trials={old:{phase:'halted',negativeStatus:500,marker:'KEEP'}});
+ const old=()=>{const j=JSON.parse([...h.storage.data.entries()].find(([k])=>k.startsWith('garancije-drive-integration-v1:'))[1]);delete j.textExperiment;return JSON.stringify(j);};
+ const snapshot=old(),before=clone([...h.records]);for(const name of ['read','list','commit','beginAttachmentEdit'])h.window.driveEnvironment.metadataStore[name]=async()=>{throw Error('FIREBASE_FORBIDDEN');};
+ return {...h,old,snapshot,before};
+}
+const txtStart=h=>h.service.textTrial({userId:h.user.uid,action:'start'});
+const txtRead=h=>h.service.textTrial({userId:h.user.uid,action:'inspect',expectedRevision:h.service.getTextTrial(h.user.uid).revision});
+const txtTrash=h=>h.service.textTrial({userId:h.user.uid,action:'trash',expectedRevision:h.service.getTextTrial(h.user.uid).revision,acknowledgedResult:true});
+test('isolated TXT uses one reserved ID, real E0/E1 and 412 preserving B, with no Firebase or old draft/trial changes',async()=>{
+ const h=await txtHarness(),result=await txtStart(h);
+ assert.equal(result.phase,'passed');assert.equal(result.negativeStatus,412);assert.equal(result.observedName,'GP-provera-B.txt');assert.equal(result.e1Different,true);
+ assert.equal(h.remote.size,3);assert.deepEqual(h.calls.filter(x=>x.method==='POST').map(x=>new URL(x.url).pathname),['/upload/drive/v3/files']);
+ assert.deepEqual(h.patches().map(x=>JSON.parse(x.body).title),['GP-provera-B.txt','GP-provera-C.txt']);
+ assert.equal(h.old(),h.snapshot);assert.deepEqual(clone([...h.records]),h.before);assert.equal(h.writes.length,0);assert.equal(JSON.stringify(result).includes('"v1"'),false);
+ await assert.rejects(txtStart(h));assert.equal(h.remote.size,3);
+});
+for(const code of [500,200,403])test('TXT stale E0 '+code+' halts without further PATCH or rollback',async()=>{
+ const h=await txtHarness({txtStaleStatus:code});await assert.rejects(txtStart(h));const s=h.service.getTextTrial(h.user.uid);
+ assert.equal(s.negativeStatus,code);assert.equal(s.phase,'halted');assert.equal(s.passed,false);assert.equal(s.observedName,code===200?'GP-provera-C.txt':'GP-provera-B.txt');assert.equal(h.patches().length,2);
+ assert.equal(s.events.find(e=>e.label==='stale_E0').status,code);await assert.rejects(txtStart(h));assert.equal(h.patches().length,2);assert.equal(h.old(),h.snapshot);
+});
+for(const fault of ['txtIdLost','txtCreateLost','txtValidLost','txtStaleLost'])test('TXT '+fault+' never repeats writes or claims proof from observed filename',async()=>{
+ const h=await txtHarness({[fault]:true});await assert.rejects(txtStart(h));const count=h.calls.filter(x=>['POST','PATCH'].includes(x.method)).length,s=h.service.getTextTrial(h.user.uid);
+ assert.equal(s.uncertain,true);await assert.rejects(txtStart(h));if(s.fileId){await txtRead(h);assert.notEqual(h.service.getTextTrial(h.user.uid).passed,true);}await assert.rejects(txtTrash(h));
+ assert.equal(h.calls.filter(x=>['POST','PATCH'].includes(x.method)).length,count);assert.ok(h.remote.size<=3);assert.equal(h.old(),h.snapshot);
+});
+for(const fault of ['txtMissingTag','txtWeakTag','txtEqualTag'])test('TXT '+fault+' blocks incomplete validator sequence',async()=>{
+ const h=await txtHarness({[fault]:true});await assert.rejects(txtStart(h));assert.equal(h.service.getTextTrial(h.user.uid).phase,'halted');assert.equal(h.patches().length,fault==='txtEqualTag'?1:0);assert.equal(h.old(),h.snapshot);
+});
+test('TXT sanitizes error code/reason/message without tokens, URLs, emails or headers',async()=>{
+ const secret='ya29.abcdefghijklmnopqrstuvwxyz0123456789';
+ const h=await txtHarness({txtStaleStatus:500,txtErrorMessage:'Backend Error Bearer '+secret+' https://private.invalid/?token=secret owner@example.invalid '+('x'.repeat(90))});await assert.rejects(txtStart(h));
+ const s=h.service.getTextTrial(h.user.uid),event=s.events.find(e=>e.label==='stale_E0'),out=JSON.stringify(s);
+ assert.equal(event.errorCode,500);assert.equal(event.reason,'backendError');assert.ok(event.message.length<=160);
+ for(const value of [secret,'private.invalid','owner@example.invalid','Authorization','uploadURL','access_token'])assert.ok(!out.includes(value));
+});
+test('TXT refresh/two tabs/double click never create a second file',async()=>{
+ const h=await txtHarness();const rs=await Promise.allSettled([txtStart(h),txtStart(h)]);assert.equal(rs.filter(x=>x.status==='fulfilled').length,1);
+ const next=await harness({storage:h.storage,remote:h.remote,txtEnabled:true,uploads:true});await assert.rejects(txtStart(next));
+ assert.equal(h.calls.filter(x=>x.method==='POST').length,1);assert.equal(next.calls.length,0);assert.equal(h.remote.size,3);
+ await txtRead(next);assert.equal(next.service.getTextTrial(next.user.uid).passed,true);
+});
+test('TXT readonly identity/revision changes cannot redirect or clear prior evidence',async()=>{
+ const h=await txtHarness();await txtStart(h);const s=h.service.getTextTrial(h.user.uid);
+ await assert.rejects(h.service.textTrial({userId:h.user.uid,action:'inspect',expectedRevision:s.revision-1}));
+ h.remote.get(s.fileId).sha256Checksum='f'.repeat(64);await assert.rejects(txtRead(h));assert.equal(h.patches().length,2);assert.equal(h.old(),h.snapshot);
+});
+test('TXT safe trash requires read acknowledgement, verifies exact ID and never purges',async()=>{
+ const h=await txtHarness();await txtStart(h);let s=h.service.getTextTrial(h.user.uid);
+ await assert.rejects(h.service.textTrial({userId:h.user.uid,action:'trash',expectedRevision:s.revision}));assert.equal(h.patches().length,2);
+ const r=await txtTrash(h);assert.equal(r.phase,'trashed');assert.equal(h.remote.get(r.fileId).trashed,true);
+ assert.ok(h.patches().every(x=>new URL(x.url).pathname.endsWith('/'+r.fileId)));assert.deepEqual(JSON.parse(h.patches()[2].body),{labels:{trashed:true}});
+ assert.ok(h.calls.every(x=>x.method!=='DELETE'));assert.equal(h.old(),h.snapshot);
+});
+test('TXT uncertain trash is not repeated and preserves exact ID for readonly reconciliation',async()=>{
+ const h=await txtHarness({txtTrashLost:true});await txtStart(h);const id=h.service.getTextTrial(h.user.uid).fileId;await assert.rejects(txtTrash(h));
+ await txtRead(h);assert.equal(h.service.getTextTrial(h.user.uid).observedTrashed,true);await assert.rejects(txtTrash(h));assert.equal(h.patches().length,3);assert.equal(h.service.getTextTrial(h.user.uid).fileId,id);
+});
+
+test('TXT valid E0 HTTP500 stops before stale C and preserves sanitized phase evidence',async()=>{
+ const h=await txtHarness({txtValidStatus:500});await assert.rejects(txtStart(h));const s=h.service.getTextTrial(h.user.uid);
+ assert.equal(h.patches().length,1);assert.equal(s.negativeStatus,undefined);assert.equal(s.events.find(e=>e.label==='valid_E0').status,500);assert.equal(s.phase,'halted');assert.equal(h.old(),h.snapshot);
+});
+test('TXT repeated readonly reconciliation never evicts original stale-request evidence',async()=>{
+ const h=await txtHarness({txtStaleStatus:500});await assert.rejects(txtStart(h));for(let i=0;i<32;i++)await txtRead(h);
+ const s=h.service.getTextTrial(h.user.uid);assert.equal(s.events.find(e=>e.label==='stale_E0').status,500);assert.equal(s.events.filter(e=>e.label==='inspect').length,1);assert.equal(h.patches().length,2);
+});
+test('TXT two overlapping tab services share persisted run and create exactly one file',async()=>{
+ const h=await txtHarness(),next=await harness({storage:h.storage,remote:h.remote,txtEnabled:true,uploads:true});
+ const rs=await Promise.allSettled([txtStart(h),txtStart(next)]);assert.equal(rs.filter(r=>r.status==='fulfilled').length,1);
+ assert.equal(h.calls.filter(c=>c.method==='POST').length+next.calls.filter(c=>c.method==='POST').length,1);assert.equal(h.remote.size,3);assert.equal(h.old(),h.snapshot);
+});
+test('TXT stale owner during file GET stops before any rename and cannot touch old draft',async()=>{
+ const h=await txtHarness();h.config.onTxtGet=()=>h.window.firebaseDeps.auth.currentUser={uid:'other',email:'other.invalid'};
+ await assert.rejects(txtStart(h));h.window.firebaseDeps.auth.currentUser=h.user;assert.equal(h.patches().length,0);assert.equal(h.old(),h.snapshot);
+});
+
