@@ -1595,3 +1595,62 @@ test('Chromium gallery decoder uses verified independent bytes after native File
   console.log('DOM gallery: actual PNG decode/thumbnail/object URLs, two native Files revoked after prepare, same bytes/hash/MIME retained independently, no network. No Android-provider or reload persistence claim.');
  }finally{await browser.close();}
 });
+
+test('Chromium footer help preserves live draft and view; X/Escape/history Back restore header focus; mobile/200% layout',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
+ const {createRequire}=await import('node:module'),req=createRequire(import.meta.url),pw=req(process.env.GP_PLAYWRIGHT_PATH),babel=req(process.env.GP_BABEL_PATH);
+ const navStart=html.indexOf('        const appNavigation ='),hookStart=html.indexOf('        function useBackLayer('),navEnd=html.indexOf('\n        }',hookStart)+10;
+ const navigation=html.slice(navStart,navEnd),components=html.slice(html.indexOf('        function HelpDialog('),html.indexOf('        function Catalog('));
+ assert.ok(navStart>0&&hookStart>navStart&&components.includes('function AppFooter'));
+ const entry=html.match(/<script type="text\/babel"[^>]*>([\s\S]*?)<\/script>/)[1];babel.transform(entry,{presets:[['react',{runtime:'classic'}]]});
+ const libs=await Promise.all([...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m=>m[1]).filter(u=>/react(?:-dom)?@/.test(u)).map(async u=>{const r=await fetch(u);assert.equal(r.status,200);return r.text();}));
+ const browser=await pw.chromium.launch({headless:true,...(process.env.GP_CHROMIUM_PATH?{executablePath:process.env.GP_CHROMIUM_PATH}:{})});
+ try{
+  const page=await browser.newPage({viewport:{width:390,height:844}}),errors=[];page.on('pageerror',e=>errors.push(e.message));let requests=0;
+  await page.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body class="gp-ui"><div id="root"></div></body></html>'}):(requests++,r.abort()));
+  await page.goto('http://localhost/');await page.addStyleTag({content:html.match(/<style>([\s\S]*?)<\/style>/)[1]});for(const content of libs)await page.addScriptTag({content});await page.addScriptTag({content:script});
+  const email=/const EMAIL = '([^']+)'/.exec(script)[1];
+  const setup=`const {useState,useEffect,useRef}=React;const RELEASE_VERSION='2026.11.03.6';
+   ${navigation}\n${components}
+   window.helpRouteRestores=0;window.helpGuardCalls=0;window.helpRemoteWrites=0;window.helpReady=false;window.helpError='';
+   window.firebaseDeps={auth:{currentUser:{uid:'synthetic-help-owner',email:${JSON.stringify(email)}}}};
+   window.helpRoot=ReactDOM.createRoot(document.getElementById('root'));
+   function HelpFixture({view,service}){
+    const headerRef=useRef(null),[name,setName]=useState('Synthetic help '+view),[pending]=useState(()=>[{id:'help-image',name:'Synthetic.png',mime:'image/png',size:14,sha256:'c'.repeat(64),original:new Blob(['SYNTHETIC_HELP'],{type:'image/png'})}]);
+    useEffect(()=>{let active=true;window.helpReady=false;service.stageDraft({userId:'synthetic-help-owner',id:null,base:null,metadata:{name,purchaseDate:'2026-11-03',baseMonths:12},attachments:[],pending,operationId:'help-op-'+view,expectedRevision:()=>service.contentRevision(service.getDraft('synthetic-help-owner')),isCurrent:()=>active}).then(()=>{if(active)window.helpReady=true;},e=>{if(active)window.helpError=e.message;});return()=>{active=false;};},[name]);
+    window.helpPending=pending;
+    return <><header className="app-header" ref={headerRef} tabIndex={-1} aria-label="Zaglavlje aplikacije"><div className="gp-container header-inner"><span className="brand">GarancijePro</span></div></header><main className="gp-container" style={{minHeight:'1400px',paddingTop:'24px'}}><p className="section-label">IZOLOVANA PROBA</p><h1>{view}</h1><label>Naziv probnog proizvoda<input value={name} onChange={e=>setName(e.target.value)}/></label><p>Sintetički unos. Nema produkcionih upisa.</p></main><AppFooter headerRef={headerRef}/></>;
+   }
+   window.mountHelpFixture=async view=>{
+    window.helpRoot.render(null);await new Promise(r=>setTimeout(r,0));window.helpReady=false;window.helpError='';
+    const user=window.firebaseDeps.auth.currentUser,service=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'gp-help-test-'+view,storage:localStorage,getUser:()=>user,metadataStore:{read:async()=>null,list:async()=>[],commit:async()=>{window.helpRemoteWrites++;throw Error('WRITE_FORBIDDEN');}},fetch:async()=>{window.helpRemoteWrites++;throw Error('NETWORK_FORBIDDEN');}});
+    window.helpService=service;await service.authChanged(user);appNavigation.start(()=>window.helpRouteRestores++,()=>{});appNavigation.record({view,operationId:'help-op-'+view});appNavigation.guard({allow:()=>{window.helpGuardCalls++;return false;},warn:()=>true});window.helpRoot.render(<HelpFixture key={view} view={view} service={service}/>);
+   };
+   window.captureHelpState=()=>{window.helpSavedNode=document.querySelector('input');window.helpSavedBlob=window.helpPending[0].original;return {journal:JSON.stringify(Object.fromEntries(Object.keys(localStorage).sort().map(k=>[k,localStorage.getItem(k)]))),draft:JSON.stringify(window.helpService.getDraft('synthetic-help-owner')),value:window.helpSavedNode.value};};
+   window.readHelpState=()=>({journal:JSON.stringify(Object.fromEntries(Object.keys(localStorage).sort().map(k=>[k,localStorage.getItem(k)]))),draft:JSON.stringify(window.helpService.getDraft('synthetic-help-owner')),value:document.querySelector('input').value,sameNode:document.querySelector('input')===window.helpSavedNode,sameBlob:window.helpPending[0].original===window.helpSavedBlob});`;
+  await page.addScriptTag({content:babel.transform(setup,{presets:[['react',{runtime:'classic'}]]}).code});
+  const trigger=page.getByRole('button',{name:'Uputstvo',exact:true}),modal=page.getByRole('dialog',{name:'Uputstvo za korištenje'}),close=page.getByRole('button',{name:'Zatvori uputstvo i vrati se na vrh'});
+  for(const [i,view]of ['add','edit','detail','settings','list'].entries()){
+   await page.evaluate(v=>window.mountHelpFixture(v),view);await page.waitForFunction(()=>window.helpReady||window.helpError);assert.equal(await page.evaluate(()=>window.helpError),'');
+   await page.getByRole('textbox').fill('Retained '+view+' ćčš');await page.waitForFunction(()=>window.helpReady&&window.helpService.getDraft('synthetic-help-owner').metadata.name.startsWith('Retained'));
+   const before=await page.evaluate(()=>window.captureHelpState());
+   for(const method of ['x','escape','back']){
+    await trigger.click();await modal.waitFor({state:'visible'});assert.equal(await page.evaluate(()=>document.activeElement.id),'help-title');assert.equal(await modal.locator('ol>li').count(),7);assert.equal(await modal.locator('.help-content').evaluate(e=>getComputedStyle(e).textAlign),'left');assert.equal(await modal.locator('.help-content').evaluate(e=>getComputedStyle(e).fontSize),'16px');
+    assert.equal(await page.getByRole('textbox').evaluate(e=>e.matches(':modal')||e.closest('dialog')!==null),false);
+    if(method==='x'){await close.click();await close.click({timeout:200}).catch(()=>{});}else if(method==='escape')await page.keyboard.press('Escape');else await page.goBack();
+    await modal.waitFor({state:'detached'});await page.waitForFunction(()=>document.activeElement?.classList.contains('app-header')&&window.scrollY===0);
+    const after=await page.evaluate(()=>window.readHelpState());assert.deepEqual(after,{...before,sameNode:true,sameBlob:true});assert.equal(await page.evaluate(()=>document.body.style.overflow),'');assert.equal(await page.evaluate(()=>document.documentElement.style.overflow),'');
+   }
+  }
+  assert.deepEqual(await page.evaluate(()=>({routes:window.helpRouteRestores,guards:window.helpGuardCalls,writes:window.helpRemoteWrites})),{routes:0,guards:0,writes:0});
+  for(const width of [320,390,430,1280])for(const scale of [1,2]){
+   await page.setViewportSize({width,height:844});await page.addStyleTag({content:'body.gp-ui{font-size:'+16*scale+'px}body.gp-ui .help-content h3{font-size:'+16*scale+'px}body.gp-ui .help-content{font-size:'+16*scale+'px}body.gp-ui .help-toolbar h2{font-size:'+20.8*scale+'px}'});
+   await trigger.click();await modal.waitFor({state:'visible'});
+   const layout=await modal.evaluate(el=>{const r=el.getBoundingClientRect(),c=el.querySelector('.help-content'),x=el.querySelector('button').getBoundingClientRect();return {within:r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight,noHorizontal:el.scrollWidth<=el.clientWidth+1&&c.scrollWidth<=c.clientWidth+1,scrolls:c.scrollHeight>c.clientHeight,closeSize:x.width>=44&&x.height>=44,closeVisible:x.top>=r.top&&x.bottom<=r.bottom};});
+   assert.deepEqual(layout,{within:true,noHorizontal:true,scrolls:true,closeSize:true,closeVisible:true},width+'px '+scale+'x');
+   await close.focus();await page.keyboard.press('Shift+Tab');assert.equal(await page.evaluate(()=>document.activeElement.className),'help-content');await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Zatvori uputstvo i vrati se na vrh');await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement.className),'help-content');
+   await modal.locator('.help-content').evaluate(e=>e.scrollTop=e.scrollHeight);assert.equal(await close.isVisible(),true);await close.click();await modal.waitFor({state:'detached'});
+  }
+  if(process.env.GP_HELP_ARTIFACT_DIR){const {mkdir}=await import('node:fs/promises');await mkdir(process.env.GP_HELP_ARTIFACT_DIR,{recursive:true});for(const [width,scale]of [[390,1],[390,2],[1280,1]]){await page.setViewportSize({width,height:844});await page.addStyleTag({content:'body.gp-ui{font-size:'+16*scale+'px}body.gp-ui .help-content,body.gp-ui .help-content h3{font-size:'+16*scale+'px}body.gp-ui .help-toolbar h2{font-size:'+20.8*scale+'px}'});await trigger.click();await modal.waitFor({state:'visible'});await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/help-'+width+(scale===2?'-200':'')+'.png'});await close.click();await modal.waitFor({state:'detached'});}}
+  assert.equal(requests,0);assert.deepEqual(errors,[]);console.log('HELP: X/Escape/history Back in five views; same live service journal/draft/input/Blob; header focus/top; native modal focus cycle; 320/390/430/1280 at 100/200% text; no remote writes or browser network. Physical Android Back remains untested.');
+ }finally{await browser.close();}
+});
