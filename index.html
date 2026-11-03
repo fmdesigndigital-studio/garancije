@@ -225,7 +225,10 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
             white-space:normal;
             overflow-wrap:anywhere;
         }
-        body.gp-ui .help-trigger{margin-top:1rem;min-height:46px;font-weight:650}
+        body.gp-ui .header-right{justify-content:flex-end;margin-left:auto;max-width:100%}
+        body.gp-ui .header-actions{display:flex;align-items:stretch;flex-wrap:nowrap;gap:.4rem;max-width:100%}
+        body.gp-ui .header-right .header-actions>button{min-width:44px;min-height:44px}
+        body.gp-ui .help-trigger{margin:0;font-weight:650;white-space:nowrap}
         body.gp-ui .help-dialog{font-size:1rem;line-height:1.6;text-align:left;width:min(42rem,calc(100vw - 24px));max-height:calc(100dvh - 32px);padding:0;margin:auto;border:1px solid var(--line);border-radius:20px;color:var(--ink);background:#fff;overflow:hidden;box-shadow:0 20px 70px #142d5240}
         body.gp-ui .help-dialog[open]{display:flex;flex-direction:column}
         body.gp-ui .help-dialog::backdrop{background:#142d5280}
@@ -235,7 +238,7 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         body.gp-ui .help-content{overflow-y:auto;overscroll-behavior:contain;min-height:0;padding:20px;line-height:1.6}
         body.gp-ui .help-content ol{margin:0;padding-left:1.4rem}
         body.gp-ui .help-content li+li{margin-top:1.1rem}
-        body.gp-ui .help-content h3{font-size:1rem;line-height:1.4;margin-bottom:.3rem}
+        body.gp-ui .help-content h3{font-size:1rem;font-weight:800;line-height:1.4;margin-bottom:.3rem}
         body.gp-ui .help-content .help-intro{margin-bottom:1rem;color:var(--muted)}
         body.gp-ui .help-content:focus-visible,body.gp-ui .help-toolbar h2:focus-visible,body.gp-ui .app-header:focus-visible{outline:3px solid #8548c6;outline-offset:-4px}
     </style>
@@ -2839,7 +2842,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.03.7';
+        const RELEASE_VERSION = '2026.11.03.8';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -3105,13 +3108,14 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 </div>
             </dialog>;
         }
-        function AppFooter({headerRef}) {
+        function HelpControl({headerRef}) {
             const [helpOpen,setHelpOpen]=useState(false),navigationPending=useNavigationPending();
+            return <><button type="button" className="help-trigger" aria-haspopup="dialog" disabled={navigationPending} onClick={()=>setHelpOpen(true)}>Uputstvo</button>{helpOpen&&<HelpDialog headerRef={headerRef} onClose={()=>setHelpOpen(false)}/>}</>;
+        }
+        function AppFooter() {
             return <footer className="app-footer">
                 <p>GarancijePro · Lična evidencija računa i garancija</p>
                 <p>© {new Date().getFullYear()} FM DESIGN DIGITAL STUDIO · Verzija {RELEASE_VERSION}</p>
-                <button type="button" className="help-trigger" aria-haspopup="dialog" disabled={navigationPending} onClick={()=>setHelpOpen(true)}>Uputstvo</button>
-                {helpOpen&&<HelpDialog headerRef={headerRef} onClose={()=>setHelpOpen(false)}/>}
                 <div className="nature-note"><span className="nature-icon"><svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M20 4C10 2 3 7 5 15c3 8 16 3 15-11Z"/><path d="M5 21 16 9M10 16v-5"/></svg></span><span>Korišćenjem digitalnih izdanja čuvamo prirodu</span></div>
             </footer>;
         }
@@ -3494,7 +3498,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 <a href="#app-main" className="skip-link" onClick={e=>{e.preventDefault();mainRef.current?.focus();mainRef.current?.scrollIntoView({block:'start'});}}>Pređi na sadržaj</a>
                 <header ref={headerRef} tabIndex={-1} aria-label="Zaglavlje aplikacije" className="app-header"><div className="gp-container header-inner">
                     <button type="button" className="brand quiet" disabled={formBusy} onClick={()=>navigate('list')}><span className="brand-mark"><Icon name="shield-check"/></span><span>GarancijePro</span></button>
-                    <div className="header-right"><TabPresence/><button type="button" className="settings-button" aria-label="Podešavanja" disabled={formBusy} onClick={()=>navigate('settings')}><svg viewBox="0 0 24 24" aria-hidden="true"/><span className="settings-icon" aria-hidden="true"><Icon name="settings"/></span></button></div>
+                    <div className="header-right"><TabPresence/><div className="header-actions"><HelpControl headerRef={headerRef}/><button type="button" className="settings-button" aria-label="Podešavanja" disabled={formBusy} onClick={()=>navigate('settings')}><svg viewBox="0 0 24 24" aria-hidden="true"/><span className="settings-icon" aria-hidden="true"><Icon name="settings"/></span></button></div></div>
                 </div></header>
                 <main className="gp-container" id="app-main" ref={mainRef} tabIndex={-1}>
                     {navigationPending&&<p role="status" className="notice">Čekam potvrdu lokalnog nacrta pre povratka…</p>}{notice&&<p role="status" className="toast">{notice}</p>}{authError&&<p role="alert" className="error">{authError}</p>}
@@ -3513,7 +3517,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         <button type="button" aria-current={view==='add'||view==='edit'?'page':undefined} disabled={draftActionDisabled||view==='add'||view==='edit'} onClick={()=>openForm(null,false,'new')}><Icon name="plus"/><span>Dodaj proizvod</span></button>
                         <button type="button" aria-current={view==='settings'?'page':undefined} disabled={formBusy} onClick={()=>navigate('settings')}><Icon name="settings"/><span>Podešavanja</span></button>
                     </nav>
-                </main><AppFooter headerRef={headerRef}/>
+                </main><AppFooter/>
             </div>;
         }
 

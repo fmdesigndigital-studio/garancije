@@ -1596,29 +1596,32 @@ test('Chromium gallery decoder uses verified independent bytes after native File
  }finally{await browser.close();}
 });
 
-test('Chromium footer help preserves live draft and view; X/Escape/history Back restore header focus; mobile/200% layout',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
+test('Chromium header help preserves live draft/view; paired settings and real tab presence; X/Escape/Back and 200% layout',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
  const {createRequire}=await import('node:module'),req=createRequire(import.meta.url),pw=req(process.env.GP_PLAYWRIGHT_PATH),babel=req(process.env.GP_BABEL_PATH);
  const navStart=html.indexOf('        const appNavigation ='),hookStart=html.indexOf('        function useBackLayer('),navEnd=html.indexOf('\n        }',hookStart)+10;
  const navigation=html.slice(navStart,navEnd),components=html.slice(html.indexOf('        function HelpDialog('),html.indexOf('        function Catalog('));
+ const presenceCode=html.slice(html.indexOf('        function TabPresence('),html.indexOf('        function AttachmentCountRepair('));
+ const iconCode=html.slice(html.indexOf('        const Icon ='),html.indexOf('        // Navigation entries'));
+ const headerStart=html.indexOf('                <header ref={headerRef}'),headerMarkup=html.slice(headerStart,html.indexOf('</header>',headerStart)+9);
  assert.ok(navStart>0&&hookStart>navStart&&components.includes('function AppFooter'));
  const entry=html.match(/<script type="text\/babel"[^>]*>([\s\S]*?)<\/script>/)[1];babel.transform(entry,{presets:[['react',{runtime:'classic'}]]});
- const libs=await Promise.all([...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m=>m[1]).filter(u=>/react(?:-dom)?@/.test(u)).map(async u=>{const r=await fetch(u);assert.equal(r.status,200);return r.text();}));
+ const libs=await Promise.all([...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m=>m[1]).filter(u=>/react(?:-dom)?@|lucide@/.test(u)).map(async u=>{const r=await fetch(u);assert.equal(r.status,200);return r.text();}));
  const browser=await pw.chromium.launch({headless:true,...(process.env.GP_CHROMIUM_PATH?{executablePath:process.env.GP_CHROMIUM_PATH}:{})});
  try{
-  const page=await browser.newPage({viewport:{width:390,height:844}}),errors=[];page.on('pageerror',e=>errors.push(e.message));let requests=0;
+  const context=await browser.newContext({viewport:{width:390,height:844}}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));let requests=0;
   await page.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body class="gp-ui"><div id="root"></div></body></html>'}):(requests++,r.abort()));
   await page.goto('http://localhost/');await page.addStyleTag({content:html.match(/<style>([\s\S]*?)<\/style>/)[1]});for(const content of libs)await page.addScriptTag({content});await page.addScriptTag({content:script});
   const email=/const EMAIL = '([^']+)'/.exec(script)[1];
-  const setup=`const {useState,useEffect,useRef}=React;const RELEASE_VERSION='2026.11.03.6';
-   ${navigation}\n${components}
+  const setup=`const {useState,useEffect,useRef}=React;const RELEASE_VERSION=${JSON.stringify(/const RELEASE_VERSION = '([^']+)'/.exec(html)[1])};
+   ${iconCode}\n${navigation}\n${components}\n${presenceCode}
    window.helpRouteRestores=0;window.helpGuardCalls=0;window.helpRemoteWrites=0;window.helpReady=false;window.helpError='';
    window.firebaseDeps={auth:{currentUser:{uid:'synthetic-help-owner',email:${JSON.stringify(email)}}}};
    window.helpRoot=ReactDOM.createRoot(document.getElementById('root'));
    function HelpFixture({view,service}){
     const headerRef=useRef(null),[name,setName]=useState('Synthetic help '+view),[pending]=useState(()=>[{id:'help-image',name:'Synthetic.png',mime:'image/png',size:14,sha256:'c'.repeat(64),original:new Blob(['SYNTHETIC_HELP'],{type:'image/png'})}]);
     useEffect(()=>{let active=true;window.helpReady=false;service.stageDraft({userId:'synthetic-help-owner',id:null,base:null,metadata:{name,purchaseDate:'2026-11-03',baseMonths:12},attachments:[],pending,operationId:'help-op-'+view,expectedRevision:()=>service.contentRevision(service.getDraft('synthetic-help-owner')),isCurrent:()=>active}).then(()=>{if(active)window.helpReady=true;},e=>{if(active)window.helpError=e.message;});return()=>{active=false;};},[name]);
-    window.helpPending=pending;
-    return <><header className="app-header" ref={headerRef} tabIndex={-1} aria-label="Zaglavlje aplikacije"><div className="gp-container header-inner"><span className="brand">GarancijePro</span></div></header><main className="gp-container" style={{minHeight:'1400px',paddingTop:'24px'}}><p className="section-label">IZOLOVANA PROBA</p><h1>{view}</h1><label>Naziv probnog proizvoda<input value={name} onChange={e=>setName(e.target.value)}/></label><p>Sintetički unos. Nema produkcionih upisa.</p></main><AppFooter headerRef={headerRef}/></>;
+    window.helpPending=pending;const formBusy=false,navigate=()=>{throw Error('Unexpected header navigation');};
+    return <div className={'gp-app'+(view==='list'?' home-active':'')}>${headerMarkup}<main className="gp-container" style={{minHeight:'1400px',paddingTop:'24px'}}><p className="section-label">IZOLOVANA PROBA</p><h1>{view}</h1><label>Naziv probnog proizvoda<input value={name} onChange={e=>setName(e.target.value)}/></label><p>Sintetički unos. Nema produkcionih upisa.</p></main><AppFooter/></div>;
    }
    window.mountHelpFixture=async view=>{
     window.helpRoot.render(null);await new Promise(r=>setTimeout(r,0));window.helpReady=false;window.helpError='';
@@ -1635,22 +1638,38 @@ test('Chromium footer help preserves live draft and view; X/Escape/history Back 
    const before=await page.evaluate(()=>window.captureHelpState());
    for(const method of ['x','escape','back']){
     await trigger.click();await modal.waitFor({state:'visible'});assert.equal(await page.evaluate(()=>document.activeElement.id),'help-title');assert.equal(await modal.locator('ol>li').count(),7);assert.equal(await modal.locator('.help-content').evaluate(e=>getComputedStyle(e).textAlign),'left');assert.equal(await modal.locator('.help-content').evaluate(e=>getComputedStyle(e).fontSize),'16px');
-    assert.equal(await page.getByRole('textbox').evaluate(e=>e.matches(':modal')||e.closest('dialog')!==null),false);
+    assert.equal(await page.getByRole('textbox').evaluate(e=>{e.focus();return document.activeElement===e;}),false);
     if(method==='x'){await close.click();await close.click({timeout:200}).catch(()=>{});}else if(method==='escape')await page.keyboard.press('Escape');else await page.goBack();
     await modal.waitFor({state:'detached'});await page.waitForFunction(()=>document.activeElement?.classList.contains('app-header')&&window.scrollY===0);
     const after=await page.evaluate(()=>window.readHelpState());assert.deepEqual(after,{...before,sameNode:true,sameBlob:true});assert.equal(await page.evaluate(()=>document.body.style.overflow),'');assert.equal(await page.evaluate(()=>document.documentElement.style.overflow),'');
    }
   }
   assert.deepEqual(await page.evaluate(()=>({routes:window.helpRouteRestores,guards:window.helpGuardCalls,writes:window.helpRemoteWrites})),{routes:0,guards:0,writes:0});
-  for(const width of [320,390,430,1280])for(const scale of [1,2]){
-   await page.setViewportSize({width,height:844});await page.addStyleTag({content:'body.gp-ui{font-size:'+16*scale+'px}body.gp-ui .help-content h3{font-size:'+16*scale+'px}body.gp-ui .help-content{font-size:'+16*scale+'px}body.gp-ui .help-toolbar h2{font-size:'+20.8*scale+'px}'});
-   await trigger.click();await modal.waitFor({state:'visible'});
-   const layout=await modal.evaluate(el=>{const r=el.getBoundingClientRect(),c=el.querySelector('.help-content'),x=el.querySelector('button').getBoundingClientRect();return {within:r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight,noHorizontal:el.scrollWidth<=el.clientWidth+1&&c.scrollWidth<=c.clientWidth+1,scrolls:c.scrollHeight>c.clientHeight,closeSize:x.width>=44&&x.height>=44,closeVisible:x.top>=r.top&&x.bottom<=r.bottom};});
-   assert.deepEqual(layout,{within:true,noHorizontal:true,scrolls:true,closeSize:true,closeVisible:true},width+'px '+scale+'x');
-   await close.focus();await page.keyboard.press('Shift+Tab');assert.equal(await page.evaluate(()=>document.activeElement.className),'help-content');await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Zatvori uputstvo i vrati se na vrh');await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement.className),'help-content');
-   await modal.locator('.help-content').evaluate(e=>e.scrollTop=e.scrollHeight);assert.equal(await close.isVisible(),true);await close.click();await modal.waitFor({state:'detached'});
+  if(process.env.GP_HELP_ARTIFACT_DIR){const {mkdir}=await import('node:fs/promises');await mkdir(process.env.GP_HELP_ARTIFACT_DIR,{recursive:true});}
+  for(const presence of [false,true]){
+   let peer;
+   if(presence){
+    peer=await page.context().newPage();await peer.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<!doctype html><title>Synthetic tab presence peer</title>'}):r.abort());await peer.goto('http://localhost/');
+    await peer.evaluate(()=>{window.syntheticPeer=new BroadcastChannel('garancijepro-tab-presence-v1');window.syntheticPeer.onmessage=({data})=>{if(data?.v===1&&data.type==='challenge')window.syntheticPeer.postMessage({v:1,type:'ack',sender:crypto.randomUUID(),to:data.sender,nonce:data.nonce});};});
+    await page.bringToFront();await page.evaluate(()=>window.mountHelpFixture('list'));await page.waitForFunction(()=>window.helpReady||window.helpError);assert.equal(await page.evaluate(()=>window.helpError),'');await page.getByRole('button',{name:'Druga kartica',exact:true}).waitFor({state:'visible'});
+   }
+   for(const width of [320,360,390,430,1280])for(const scale of [1,2]){
+    await page.setViewportSize({width,height:844});await page.addStyleTag({content:'html{font-size:'+16*scale+'px}body.gp-ui{font-size:'+16*scale+'px}body.gp-ui .help-content h3,body.gp-ui .help-content{font-size:'+16*scale+'px}body.gp-ui .help-toolbar h2{font-size:'+20.8*scale+'px}'});
+    assert.equal(await page.getByRole('button',{name:'Druga kartica',exact:true}).isVisible(),presence);
+    assert.equal(await page.locator('footer .help-trigger').count(),0);assert.equal(await page.locator('header .help-trigger').count(),1);
+    const header=await page.locator('header.app-header').evaluate(el=>{const pair=el.querySelector('.header-actions'),help=pair.querySelector('.help-trigger'),settings=pair.querySelector('.settings-button'),a=help.getBoundingClientRect(),b=settings.getBoundingClientRect();return {noOverflow:document.documentElement.scrollWidth<=innerWidth,paired:help.nextElementSibling===settings&&Math.abs(a.top-b.top)<1&&Math.abs(a.bottom-b.bottom)<1,inside:a.left>=0&&b.right<=innerWidth,minTarget:Math.min(a.width,a.height,b.width,b.height)>=44,weight:getComputedStyle(help).fontWeight};});
+    assert.deepEqual(header,{noOverflow:true,paired:true,inside:true,minTarget:true,weight:'650'},JSON.stringify({width,scale,presence}));
+    if(process.env.GP_HELP_ARTIFACT_DIR&&(width===320||width===390||width===1280))await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/header-'+width+'-'+(presence?'with-tab':'no-tab')+(scale===2?'-200':'')+'.png'});
+    const before=await page.evaluate(()=>window.captureHelpState());await trigger.click();await modal.waitFor({state:'visible'});
+    const layout=await modal.evaluate(el=>{const r=el.getBoundingClientRect(),c=el.querySelector('.help-content'),x=el.querySelector('button').getBoundingClientRect();return {within:r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight,noHorizontal:el.scrollWidth<=el.clientWidth+1&&c.scrollWidth<=c.clientWidth+1,scrolls:c.scrollHeight>c.clientHeight,closeSize:x.width>=44&&x.height>=44,closeVisible:x.top>=r.top&&x.bottom<=r.bottom,bold:[...el.querySelectorAll('h3')].every(h=>Number(getComputedStyle(h).fontWeight)===800)};});
+    assert.deepEqual(layout,{within:true,noHorizontal:true,scrolls:true,closeSize:true,closeVisible:true,bold:true},JSON.stringify({width,scale,presence}));
+    await close.focus();await page.keyboard.press('Shift+Tab');assert.equal(await page.evaluate(()=>document.activeElement.className),'help-content');await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),'Zatvori uputstvo i vrati se na vrh');await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement.className),'help-content');
+    if(process.env.GP_HELP_ARTIFACT_DIR&&(width===390||width===1280))await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/guide-'+width+'-'+(presence?'with-tab':'no-tab')+(scale===2?'-200':'')+'.png'});
+    await modal.locator('.help-content').evaluate(e=>e.scrollTop=e.scrollHeight);assert.equal(await close.isVisible(),true);await close.click();await modal.waitFor({state:'detached'});await page.waitForFunction(()=>document.activeElement?.classList.contains('app-header')&&window.scrollY===0);
+    assert.deepEqual(await page.evaluate(()=>window.readHelpState()),{...before,sameNode:true,sameBlob:true});
+   }
+   if(peer){await peer.evaluate(()=>window.syntheticPeer.close());await peer.close();}
   }
-  if(process.env.GP_HELP_ARTIFACT_DIR){const {mkdir}=await import('node:fs/promises');await mkdir(process.env.GP_HELP_ARTIFACT_DIR,{recursive:true});for(const [width,scale]of [[390,1],[390,2],[1280,1]]){await page.setViewportSize({width,height:844});await page.addStyleTag({content:'body.gp-ui{font-size:'+16*scale+'px}body.gp-ui .help-content,body.gp-ui .help-content h3{font-size:'+16*scale+'px}body.gp-ui .help-toolbar h2{font-size:'+20.8*scale+'px}'});await trigger.click();await modal.waitFor({state:'visible'});await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/help-'+width+(scale===2?'-200':'')+'.png'});await close.click();await modal.waitFor({state:'detached'});}}
-  assert.equal(requests,0);assert.deepEqual(errors,[]);console.log('HELP: X/Escape/history Back in five views; same live service journal/draft/input/Blob; header focus/top; native modal focus cycle; 320/390/430/1280 at 100/200% text; no remote writes or browser network. Physical Android Back remains untested.');
+  assert.equal(requests,0);assert.deepEqual(errors,[]);console.log('HEADER HELP: X/Escape/history Back in five views; unchanged live journal/draft/input/Blob; header focus/top; paired Uputstvo/settings and actual TabPresence with a synthetic BroadcastChannel peer; 20 layouts at 320/360/390/430/1280 and 100/200% text; 800-weight subtitles; no remote writes or browser network. Physical Android Back remains untested.');
  }finally{await browser.close();}
 });
