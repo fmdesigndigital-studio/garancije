@@ -229,6 +229,13 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         body.gp-ui .header-actions{display:flex;align-items:stretch;flex-wrap:nowrap;gap:.4rem;max-width:100%}
         body.gp-ui .header-right .header-actions>button{min-width:44px;min-height:44px}
         body.gp-ui .help-trigger{margin:0;font-weight:650;white-space:nowrap}
+        body.gp-ui .header-inner>.brand{max-width:100%;overflow-wrap:anywhere}
+        @media(max-width:600px){
+            /* Let presence share the brand row; keep the action pair on its own row. */
+            body.gp-ui .header-inner>.header-right{display:contents}
+            body.gp-ui .header-right>.tab-presence{margin-left:auto;max-width:100%}
+            body.gp-ui .header-right>.header-actions{flex-basis:100%;justify-content:flex-end;flex-wrap:wrap}
+        }
         body.gp-ui .help-dialog{font-size:1rem;line-height:1.6;text-align:left;width:min(42rem,calc(100vw - 24px));max-height:calc(100dvh - 32px);padding:0;margin:auto;border:1px solid var(--line);border-radius:20px;color:var(--ink);background:#fff;overflow:hidden;box-shadow:0 20px 70px #142d5240}
         body.gp-ui .help-dialog[open]{display:flex;flex-direction:column}
         body.gp-ui .help-dialog::backdrop{background:#142d5280}
@@ -2842,7 +2849,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.03.8';
+        const RELEASE_VERSION = '2026.11.03.9';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();

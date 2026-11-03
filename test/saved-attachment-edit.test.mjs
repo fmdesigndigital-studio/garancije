@@ -1596,7 +1596,7 @@ test('Chromium gallery decoder uses verified independent bytes after native File
  }finally{await browser.close();}
 });
 
-test('Chromium header help preserves live draft/view; paired settings and real tab presence; X/Escape/Back and 200% layout',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
+test('Chromium header help preserves live draft/view; mobile brand/presence row and paired actions; X/Escape/Back and 200% layout',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
  const {createRequire}=await import('node:module'),req=createRequire(import.meta.url),pw=req(process.env.GP_PLAYWRIGHT_PATH),babel=req(process.env.GP_BABEL_PATH);
  const navStart=html.indexOf('        const appNavigation ='),hookStart=html.indexOf('        function useBackLayer('),navEnd=html.indexOf('\n        }',hookStart)+10;
  const navigation=html.slice(navStart,navEnd),components=html.slice(html.indexOf('        function HelpDialog('),html.indexOf('        function Catalog('));
@@ -1646,6 +1646,7 @@ test('Chromium header help preserves live draft/view; paired settings and real t
   }
   assert.deepEqual(await page.evaluate(()=>({routes:window.helpRouteRestores,guards:window.helpGuardCalls,writes:window.helpRemoteWrites})),{routes:0,guards:0,writes:0});
   if(process.env.GP_HELP_ARTIFACT_DIR){const {mkdir}=await import('node:fs/promises');await mkdir(process.env.GP_HELP_ARTIFACT_DIR,{recursive:true});}
+  const headerLayouts=[];
   for(const presence of [false,true]){
    let peer;
    if(presence){
@@ -1653,13 +1654,23 @@ test('Chromium header help preserves live draft/view; paired settings and real t
     await peer.evaluate(()=>{window.syntheticPeer=new BroadcastChannel('garancijepro-tab-presence-v1');window.syntheticPeer.onmessage=({data})=>{if(data?.v===1&&data.type==='challenge')window.syntheticPeer.postMessage({v:1,type:'ack',sender:crypto.randomUUID(),to:data.sender,nonce:data.nonce});};});
     await page.bringToFront();await page.evaluate(()=>window.mountHelpFixture('list'));await page.waitForFunction(()=>window.helpReady||window.helpError);assert.equal(await page.evaluate(()=>window.helpError),'');await page.getByRole('button',{name:'Druga kartica',exact:true}).waitFor({state:'visible'});
    }
-   for(const width of [320,360,390,430,1280])for(const scale of [1,2]){
+   for(const width of [240,280,320,360,390,430,600,601,768,1280])for(const scale of [1,2]){
     await page.setViewportSize({width,height:844});await page.addStyleTag({content:'html{font-size:'+16*scale+'px}body.gp-ui{font-size:'+16*scale+'px}body.gp-ui .help-content h3,body.gp-ui .help-content{font-size:'+16*scale+'px}body.gp-ui .help-toolbar h2{font-size:'+20.8*scale+'px}'});
     assert.equal(await page.getByRole('button',{name:'Druga kartica',exact:true}).isVisible(),presence);
     assert.equal(await page.locator('footer .help-trigger').count(),0);assert.equal(await page.locator('header .help-trigger').count(),1);
     const header=await page.locator('header.app-header').evaluate(el=>{const pair=el.querySelector('.header-actions'),help=pair.querySelector('.help-trigger'),settings=pair.querySelector('.settings-button'),a=help.getBoundingClientRect(),b=settings.getBoundingClientRect();return {noOverflow:document.documentElement.scrollWidth<=innerWidth,paired:help.nextElementSibling===settings&&Math.abs(a.top-b.top)<1&&Math.abs(a.bottom-b.bottom)<1,inside:a.left>=0&&b.right<=innerWidth,minTarget:Math.min(a.width,a.height,b.width,b.height)>=44,weight:getComputedStyle(help).fontWeight};});
-    assert.deepEqual(header,{noOverflow:true,paired:true,inside:true,minTarget:true,weight:'650'},JSON.stringify({width,scale,presence}));
-    if(process.env.GP_HELP_ARTIFACT_DIR&&(width===320||width===390||width===1280))await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/header-'+width+'-'+(presence?'with-tab':'no-tab')+(scale===2?'-200':'')+'.png'});
+    assert.equal(header.noOverflow,true,JSON.stringify({width,scale,presence,header}));assert.equal(header.inside,true);assert.equal(header.minTarget,true);assert.equal(header.weight,'650');
+    if(width>=320||scale===1)assert.equal(header.paired,true,JSON.stringify({width,scale,presence,header}));
+    const placement=await page.locator('header.app-header').evaluate(el=>{
+     const brand=el.querySelector('.brand'),tab=el.querySelector('.tab-presence-trigger'),help=el.querySelector('.help-trigger'),settings=el.querySelector('.settings-button');
+     const nodes=[brand,tab,help,settings].filter(n=>n&&n.getClientRects().length),rect=n=>{const {x,y,width,height,top,bottom,left,right}=n.getBoundingClientRect();return {x,y,width,height,top,bottom,left,right};},b=rect(brand),a=rect(help),t=tab&&tab.getClientRects().length?rect(tab):null;
+     return {brand:b,tab:t,help:a,settings:rect(settings),visibleText:nodes.every(n=>{const r=rect(n),s=getComputedStyle(n);return r.left>=0&&r.right<=innerWidth&&n.scrollWidth<=n.clientWidth+1&&s.textOverflow!=='ellipsis'&&s.visibility==='visible';}),noOverlap:nodes.every((n,i)=>nodes.slice(i+1).every(m=>{const r=rect(n),q=rect(m);return r.right<=q.left+.5||q.right<=r.left+.5||r.bottom<=q.top+.5||q.bottom<=r.top+.5;})),sameTopRow:t?Math.abs((b.top+b.bottom)/2-(t.top+t.bottom)/2)<1:true,actionsBelow:a.top>=Math.max(b.bottom,t?.bottom||0)};
+    });
+    assert.equal(placement.visibleText,true,JSON.stringify({width,scale,presence,placement}));assert.equal(placement.noOverlap,true,JSON.stringify({width,scale,presence,placement}));
+    if(width<=600)assert.equal(placement.actionsBelow,true,JSON.stringify({width,scale,presence,placement}));
+    if(width>=320&&width<=600&&scale===1)assert.equal(placement.sameTopRow,true,JSON.stringify({width,scale,presence,placement}));
+    headerLayouts.push({width,scale,presence,...placement});
+    if(process.env.GP_HELP_ARTIFACT_DIR&&[240,320,360,390,430,600,601,1280].includes(width))await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/header-'+width+'-'+(presence?'with-tab':'no-tab')+(scale===2?'-200':'')+'.png'});
     const before=await page.evaluate(()=>window.captureHelpState());await trigger.click();await modal.waitFor({state:'visible'});
     const layout=await modal.evaluate(el=>{const r=el.getBoundingClientRect(),c=el.querySelector('.help-content'),x=el.querySelector('button').getBoundingClientRect();return {within:r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight,noHorizontal:el.scrollWidth<=el.clientWidth+1&&c.scrollWidth<=c.clientWidth+1,scrolls:c.scrollHeight>c.clientHeight,closeSize:x.width>=44&&x.height>=44,closeVisible:x.top>=r.top&&x.bottom<=r.bottom,bold:[...el.querySelectorAll('h3')].every(h=>Number(getComputedStyle(h).fontWeight)===800)};});
     assert.deepEqual(layout,{within:true,noHorizontal:true,scrolls:true,closeSize:true,closeVisible:true,bold:true},JSON.stringify({width,scale,presence}));
@@ -1670,6 +1681,7 @@ test('Chromium header help preserves live draft/view; paired settings and real t
    }
    if(peer){await peer.evaluate(()=>window.syntheticPeer.close());await peer.close();}
   }
-  assert.equal(requests,0);assert.deepEqual(errors,[]);console.log('HEADER HELP: X/Escape/history Back in five views; unchanged live journal/draft/input/Blob; header focus/top; paired Uputstvo/settings and actual TabPresence with a synthetic BroadcastChannel peer; 20 layouts at 320/360/390/430/1280 and 100/200% text; 800-weight subtitles; no remote writes or browser network. Physical Android Back remains untested.');
+  if(process.env.GP_HELP_ARTIFACT_DIR){const {writeFile}=await import('node:fs/promises');await writeFile(process.env.GP_HELP_ARTIFACT_DIR+'/header-layouts.json',JSON.stringify(headerLayouts,null,2));}
+  assert.equal(requests,0);assert.deepEqual(errors,[]);console.log('HEADER HELP: X/Escape/history Back in five views; unchanged live journal/draft/input/Blob; header focus/top; paired Uputstvo/settings and actual TabPresence with a synthetic BroadcastChannel peer; 40 layouts at 240/280/320/360/390/430/600/601/768/1280 and 100/200% text; mobile brand/presence top row at 320-600 and 100%, actions below, no overlap or clipped labels; 800-weight subtitles; no remote writes or browser network. Physical Android Back remains untested.');
  }finally{await browser.close();}
 });
