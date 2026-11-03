@@ -206,6 +206,25 @@ body.gp-ui .text-slate-400,body.gp-ui .text-slate-500,body.gp-ui .text-slate-600
         #gp-boot p{line-height:1.5}
         #gp-boot button{min-width:44px;min-height:44px;justify-self:start}
         #gp-boot [hidden],#gp-boot[hidden],#root[hidden]{display:none!important}
+
+        body.gp-ui .form-shell .attachment-removal-success {
+            display:block;
+            inline-size:100%;
+            max-inline-size:36rem;
+            margin-block:1rem;
+            margin-inline:auto;
+            padding:.875rem 1rem;
+            border:1px solid #176144;
+            border-radius:6px;
+            background:#f0fdf4;
+            color:#176144;
+            font-size:1.25rem;
+            font-weight:700;
+            line-height:1.4;
+            text-align:center;
+            white-space:normal;
+            overflow-wrap:anywhere;
+        }
     </style>
 </head>
 <body class="gp-ui">
@@ -2698,7 +2717,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.03.2';
+        const RELEASE_VERSION = '2026.11.03.3';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -3514,6 +3533,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
             const [error, setError] = useState('');
             const [imageError, setImageError] = useState('');
             const [removing,setRemoving]=useState(false),removingRef=useRef(false),[removalNotice,setRemovalNotice]=useState('');
+            const [removalNoticeKind,setRemovalNoticeKind]=useState('neutral');
+            const showRemovalNotice=(text,kind='neutral')=>{setRemovalNotice(text);setRemovalNoticeKind(kind);};
             const [v2Busy,setV2Busy]=useState(false),v2BusyRef=useRef(false);
             const savingRef = useRef(false), processingRef = useRef(recoveringPhotos?1:0);
             const [staging,setStaging]=useState(false),stagingRef=useRef(false),stageSequence=useRef(0);
@@ -3703,21 +3724,21 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 if(!resume&&(!target||target.legacy||target.storage!=='google-drive'))return;
                 const old=attachmentRefs(metadataBase.current).find(a=>a.id===id);
                 if(!resume&&!window.confirm('Ukloniti prilog "'+(old?.name||target.name)+'" odmah iz garancije, zatim premestiti isti fajl u Drive korpu? Odustani iz forme ne ponistava ovu radnju. Garancija i ostali prilozi ostaju. Nema trajnog brisanja.'))return;
-                removingRef.current=true;setRemoving(true);setImageError('');setRemovalNotice('Proveravam stanje priloga.');
+                removingRef.current=true;setRemoving(true);setImageError('');showRemovalNotice('Proveravam stanje priloga.');
                 const isCurrent=()=>mounted.current&&!disposed.current&&!discardingRef.current&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
                 try{
                     if(!resume&&stageTask.current&&!await stageTask.current)throw Error('Sacekajte potvrdu lokalnog nacrta pre uklanjanja.');
                     stageSequence.current++;
-                    const onUnlinked=()=>{if(isCurrent()){syncSavedRemoval();setRemovalNotice('Prilog je uklonjen iz evidencije. Premestanje u Drive korpu jos nije potvrdjeno.');}};
+                    const onUnlinked=()=>{if(isCurrent()){syncSavedRemoval();showRemovalNotice('Prilog je uklonjen iz evidencije. Premestanje u Drive korpu jos nije potvrdjeno.');}};
                     if(resume)await service.resumeSavedAttachmentEdit({userId:user.uid,id:initial.id,isCurrent,onUnlinked});
                     else await service.removeSavedAttachment({userId:user.uid,id:initial.id,attachmentId:id,expectedRevision:()=>draftRevisionRef.current,
                         expectedMetadata:form,expectedAttachments:attachments,expectedPending:()=>draftPending.current,isCurrent,onUnlinked});
-                    if(isCurrent()){syncSavedRemoval();setRemovalNotice('Prilog je uklonjen iz garancije i potvrdjen u Drive korpi. Odustani ga ne vraca.');}
+                    if(isCurrent()){syncSavedRemoval();showRemovalNotice('Prilog je uklonjen iz garancije i potvrdjen u Drive korpi. Odustani ga ne vraca.');}
                 }catch(e){
                     if(isCurrent()){
                         try{syncSavedRemoval();}catch{savedEditPendingRef.current=true;setSavedEditPending(true);}
                         setImageError(e.message);
-                        if(savedEditPendingRef.current)setRemovalNotice('Operacija nije zavrsena. Referenca je mozda vec uklonjena; Drive korpa jos nije potvrdjena. Koristite Nastavi uklanjanje priloga.');
+                        if(savedEditPendingRef.current)showRemovalNotice('Operacija nije zavrsena. Referenca je mozda vec uklonjena; Drive korpa jos nije potvrdjena. Koristite Nastavi uklanjanje priloga.');
                     }
                 }finally{removingRef.current=false;if(mounted.current)setRemoving(false);}
             };
@@ -3737,14 +3758,14 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 const target=pending.find(a=>a.id===id);if(!target)return;
                 const text='Ukloniti „'+target.name+'“ iz ovog nacrta? Ostali podaci i prilozi ostaju. Fajlovi na Drive-u se ne brišu.'+(target.documentPhoto?' Biće uklonjena i lokalna kopija ove potvrđene fotografije. Ako je nemate sačuvanu drugde, moraćete ponovo da je fotografišete.':' Izvorna datoteka na uređaju ostaje nepromenjena.');
                 if(!window.confirm(text))return;
-                removingRef.current=true;setRemoving(true);setRemovalNotice('');setImageError('');stageSequence.current++;
+                removingRef.current=true;setRemoving(true);showRemovalNotice('');setImageError('');stageSequence.current++;
                 const current=()=>mounted.current&&!disposed.current&&!discardingRef.current&&!savingRef.current&&!blocked()&&window.firebaseDeps?.auth?.currentUser?.uid===user.uid;
                 try{
                     const result=await service.removePendingAttachment({userId:user.uid,operationId:draftOperation.current,attachmentId:id,expectedRevision:()=>draftRevisionRef.current,expectedPending:()=>draftPending.current,expectedMetadata:form,expectedAttachments:attachments,isCurrent:current});
                     if(!current())return;
                     acknowledgeDraft(result.draft);
                     setPending(previous=>result.draft.pending.map(meta=>({...previous.find(a=>a.id===meta.id&&a.sha256===meta.sha256),...meta})));
-                    setRemovalNotice(result.localCopyRetained?'Prilog je uklonjen iz nacrta. Lokalna kopija čeka čišćenje.':'Prilog je uklonjen iz nacrta.');
+                    showRemovalNotice(result.localCopyRetained?'Prilog je uklonjen iz nacrta. Lokalna kopija čeka čišćenje.':'Prilog je uklonjen iz nacrta.',result.localCopyRetained?'neutral':'success');
                     requestAnimationFrame(()=>{if(current())document.getElementById('attachment-section')?.focus({preventScroll:true});});
                 }catch(e){if(current())handleDraftError(e);}
                 finally{removingRef.current=false;if(mounted.current)setRemoving(false);}
@@ -3922,8 +3943,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         <AttachmentList attachments={[...legacy, ...attachments, ...pending]} user={user} onKindChange={sealed ? null : changeKind} pendingIds={pending.map(a=>a.id)} onNameChange={sealed?null:changePendingName} onRemovePending={sealed?null:removePending} onSavedNameChange={sealed?null:changeSavedName} onRemoveSaved={sealed?null:runSavedRemoval} nameEditDisabled={saving||processing||removing||sealed||!!documentFile||blocked()} removeDisabled={saving||processing||staging||removing||!!documentFile||blocked()} />
                         <HaltedRenameRecovery user={user} operationId={draftOperation.current} contentKey={stagedContent} disabled={navigationPending||saving||processing||staging||removing||discarding||resolving||stale||!!conflict||savedEditPending} onBusy={value=>{v2BusyRef.current=value;setV2Busy(value);}} onComplete={async()=>{await applyLoadedDraft(service.getDraft(user.uid));}}/>
                         <TextConcurrencyTrial user={user} disabled={navigationPending||saving||processing||staging||removing||discarding||resolving||stale||!!conflict} onBusy={value=>{v2BusyRef.current=value;setV2Busy(value);}}/>
-                        {removalNotice&&<p role="status">{removalNotice}</p>}
-                        <LocalPhotoCleanup user={user} disabled={saving||processing||staging||removing||sealed||blocked()} onComplete={()=>setRemovalNotice('Lokalna kopija je uklonjena.')}/>
+                        <div role="status" aria-live="polite" aria-atomic="true" className="attachment-removal-status">{removalNotice&&<p className={removalNoticeKind==='success'?'attachment-removal-success':undefined}>{removalNotice}</p>}</div>
+                        <LocalPhotoCleanup user={user} disabled={saving||processing||staging||removing||sealed||blocked()} onComplete={()=>showRemovalNotice('Lokalna kopija je uklonjena.')}/>
                         {legacy.length > 0 && <p className="text-sm text-slate-500">Stari inline prilozi ostaju u zapisu. Migracija nije izvršena; sadržaj se i dalje prenosi sa tim zapisom.</p>}
                         {imageError && <p role="alert" className="text-red-700">{imageError}</p>}
                         </section><div className="form-actions">
