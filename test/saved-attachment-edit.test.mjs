@@ -572,16 +572,18 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
    "if(p==='/drive/v3/files/generateIds')return new Response(JSON.stringify({ids:['synthetic_txt_dom_01']}));if(p==='/upload/drive/v3/files'){window.txtCreates++;if(window.txtCreates!==1)throw Error('DUPLICATE');const raw=await init.body.text(),parts=raw.split('--'+init.body.type.split('boundary=')[1]),m=JSON.parse(parts[1].split('\\r\\n\\r\\n')[1].replace(/\\r\\n$/,'')),content=parts[2].split('\\r\\n\\r\\n')[1].replace(/\\r\\n$/,'');window.txtRemote={...m,size:String(new TextEncoder().encode(content).length),sha256Checksum:m.appProperties.sha256,v:1,trashed:false};return new Response(JSON.stringify({id:m.id}));}",
    "const f=window.txtRemote;if(!f||p!=='/drive/v2/files/'+f.id)throw Error('UNAPPROVED_TARGET');if((init.method||'GET')==='GET')return new Response(JSON.stringify({...f,title:f.name,fileSize:f.size,etag:'\"v'+f.v+'\"',version:String(f.v),ownedByMe:true,shared:false,permissions,capabilities:{canRename:true,canTrash:true},labels:{trashed:f.trashed},parents:f.parents.map(id=>({id})),properties:Object.entries(f.appProperties).map(([key,value])=>({key,value,visibility:'PRIVATE'}))}));if(init.method!=='PATCH')throw Error('UNAPPROVED_METHOD');const b=JSON.parse(init.body);window.txtPatches.push(b);if(init.headers['If-Match']!=='\"v'+f.v+'\"')return new Response(JSON.stringify({error:{code:412,errors:[{reason:'conditionNotMet'}],message:'Precondition Failed'}}),{status:412});if(b.title)f.name=b.title;else f.trashed=true;f.v++;return new Response(JSON.stringify({id:f.id,title:f.name}));}});",
    "window.attachmentService=window.txtService;function TextFixture(){const [busy,setBusy]=useState(false);return <fieldset disabled={busy}><TextConcurrencyTrial user={window.firebaseDeps.auth.currentUser} onBusy={setBusy}/></fieldset>;}",
-   "window.mountText=async()=>{await window.txtService.authChanged(window.firebaseDeps.auth.currentUser);await window.txtService.connect();await window.txtService.stageDraft({userId:'synthetic-owner',base:null,metadata:{name:'KEEP OLD DRAFT'},attachments:[],pending:[],operationId:'unrelated-old-draft',expectedRevision:window.txtService.contentRevision(null),seal:true});const key=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom'));const j=JSON.parse(localStorage.getItem(key));j.v2Trials={old:{phase:'halted',negativeStatus:500}};localStorage.setItem(key,JSON.stringify(j));window.txtUntouched=JSON.stringify({draft:j.draft,v2Trials:j.v2Trials});window.domRoot.render(<TextFixture/>);};"
+   "window.mountText=async()=>{await window.txtService.authChanged(window.firebaseDeps.auth.currentUser);await window.txtService.connect();await window.txtService.stageDraft({userId:'synthetic-owner',base:null,metadata:{name:'KEEP OLD DRAFT'},attachments:[],pending:[],operationId:'unrelated-old-draft',expectedRevision:window.txtService.contentRevision(null),seal:true});const key=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom'));const j=JSON.parse(localStorage.getItem(key));j.v2Trials={old:{phase:'halted',negativeStatus:500}};localStorage.setItem(key,JSON.stringify(j));window.txtUntouched=JSON.stringify({draft:j.draft,v2Trials:j.v2Trials});await window.txtService.textTrial({userId:'synthetic-owner',action:'start'});window.domRoot.render(<TextFixture/>);};"
   ].join('\n');
   await page.addScriptTag({content:babel.transform(textSetup,{presets:[['react',{runtime:'classic'}]]}).code});await page.evaluate(()=>window.mountText());
-  const textRegion=page.getByRole('region',{name:'Izolovana TXT provera'}),startText=textRegion.getByRole('button',{name:'Pokreni izolovanu TXT proveru',exact:true});
-  page.once('dialog',d=>d.accept());await startText.click();await page.waitForFunction(()=>window.txtService.getTextTrial('synthetic-owner')?.phase==='passed',null,{timeout:5000});
-  assert.equal(await startText.isDisabled(),true);assert.equal(await page.evaluate(()=>window.txtCreates),1);assert.deepEqual(await page.evaluate(()=>window.txtPatches),[{title:'GP-provera-B.txt'},{title:'GP-provera-C.txt'}]);
+  const textRegion=page.getByRole('region',{name:'Nedovršena Drive provera'});
+  await textRegion.waitFor();assert.equal(await page.getByRole('button',{name:'Pokreni izolovanu TXT proveru',exact:true}).count(),0);
+  assert.equal(await page.evaluate(()=>window.txtCreates),1);assert.deepEqual(await page.evaluate(()=>window.txtPatches),[{title:'GP-provera-B.txt'},{title:'GP-provera-C.txt'}]);
+  await textRegion.getByRole('button',{name:'Prikaži detalje i oporavak',exact:true}).click();
   assert.ok((await textRegion.innerText()).includes('412'));const trashText=textRegion.getByRole('button',{name:'Premesti samo probni TXT fajl u korpu',exact:true});assert.equal(await trashText.isDisabled(),true);
   await textRegion.getByRole('button',{name:'Procitaj stanje istog TXT fajla - bez izmene',exact:true}).click();assert.equal(await page.evaluate(()=>window.txtCreates),1);assert.equal(await page.evaluate(()=>window.txtPatches.length),2);
   await textRegion.getByRole('button',{name:'Procitao sam rezultat',exact:true}).click();assert.equal(await trashText.isEnabled(),true);
   page.once('dialog',d=>d.accept());await trashText.click();await page.waitForFunction(()=>window.txtService.getTextTrial('synthetic-owner')?.phase==='trashed',null,{timeout:5000});
+  await textRegion.waitFor({state:'detached'});assert.equal(await page.getByRole('button',{name:'Pokreni izolovanu TXT proveru',exact:true}).count(),0);
   assert.equal(await page.evaluate(()=>window.txtRemote.trashed),true);assert.equal(await page.evaluate(()=>window.txtCreates),1);
   assert.equal(await page.evaluate(()=>{const key=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom')),j=JSON.parse(localStorage.getItem(key));return JSON.stringify({draft:j.draft,v2Trials:j.v2Trials})===window.txtUntouched;}),true);
   assert.equal(requests,0);console.log('DOM TXT: one file, A->B->stale C gives 412, visible phase results, readonly inspect, explicit read acknowledgement before exact-ID trash, old draft/halted unchanged, no Firebase');
@@ -604,7 +606,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   assert.equal(await page.evaluate(()=>window.recPatches.length),0);assert.equal(await page.evaluate(()=>window.recCommits),0);
   page.once('dialog',d=>d.accept());await finish.click();await page.waitForFunction(()=>window.recComplete===true,null,{timeout:5000});
   assert.deepEqual(await page.evaluate(()=>window.recPatches),[{title:V2_PIN.newName}]);assert.equal(await page.evaluate(()=>window.recRecord.attachments[0].name),V2_PIN.newName);assert.equal(await page.evaluate(()=>window.recCommits),1);
-  assert.equal(await page.evaluate(()=>window.recService.getDraft('synthetic-owner').metadata.name),'KEEP UNSAVED');
+  assert.equal(await page.evaluate(()=>window.recService.getDraft('synthetic-owner').metadata.name),'KEEP UNSAVED');assert.equal(await region.count(),0);
   assert.equal(await page.evaluate(()=>{const key=Object.keys(localStorage).find(k=>k.includes('isolated-halted-recovery')),j=JSON.parse(localStorage.getItem(key));return JSON.stringify({v2Trials:j.v2Trials,textExperiment:j.textExperiment})===window.recProtected;}),true);
   assert.equal(requests,0);console.log('DOM halted recovery: readonly first, explicit confirmation, one pinned V2 rename, target-only commit, preserved unsaved metadata and old500/TXT audits');
 
@@ -614,25 +616,36 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   const remSetup=[
    html.split('\n').find(l=>l.includes('const textValue =')),html.split('\n').find(l=>l.includes('const attachmentRefs =')),
    'window.remBase='+JSON.stringify({...remBase,id:'warranty-one'})+';window.remRecord='+JSON.stringify(remBase)+';window.remFiles='+JSON.stringify(remFiles)+';window.remPatches=[];window.remWrites=0;window.remGets=0;',
-   "window.remStore={read:async()=>structuredClone(window.remRecord),list:async()=>[{...structuredClone(window.remRecord),id:'warranty-one'}],beginAttachmentEdit:async a=>{if(a.id!=='warranty-one'||window.garancijeFingerprint(window.remRecord)!==a.expected||a.operation.kind!=='remove')throw Error('CONFLICT');const base=structuredClone(window.remRecord),next={...base,attachments:base.attachments.filter(x=>x.id!==a.operation.targets[0].attachmentId)};next.attachmentCount=next.attachments.length;next.attachmentNames=next.attachments.map(x=>x.name);const op={...a.operation,postHash:await window.garancijeSavedAttachments.hash(next)};window.remRecord={...next,_attachmentEdit:op};window.remWrites++;return structuredClone(window.remRecord);},finishAttachmentRemoval:async a=>{const r=window.remRecord;if(r._attachmentEdit?.operationId!==a.operationId)throw Error('CONFLICT');const base=window.garancijeSavedAttachments.withoutEdit(r);if(await window.garancijeSavedAttachments.hash(base)!==r._attachmentEdit.postHash)throw Error('POST_CONFLICT');window.remRecord={...base,lastAttachmentOperation:{operationId:a.operationId,kind:'remove',attachmentId:r._attachmentEdit.targets[0].attachmentId}};window.remWrites++;return structuredClone(window.remRecord);}};",
+   "window.remStore={read:async()=>structuredClone(window.remRecord),list:async()=>[{...structuredClone(window.remRecord),id:'warranty-one'}],beginAttachmentEdit:async a=>{if(a.id!=='warranty-one'||window.garancijeFingerprint(window.remRecord)!==a.expected||a.operation.kind!=='remove')throw Error('CONFLICT');const base=structuredClone(window.remRecord),next={...base,attachments:base.attachments.filter(x=>x.id!==a.operation.targets[0].attachmentId)};next.attachmentCount=next.attachments.length;next.attachmentNames=next.attachments.map(x=>x.name);const op={...a.operation,postHash:await window.garancijeSavedAttachments.hash(next)};window.remLastOp=structuredClone(op);window.remRecord={...next,_attachmentEdit:op};window.remWrites++;return structuredClone(window.remRecord);},finishAttachmentRemoval:async a=>{const r=window.remRecord;if(r._attachmentEdit?.operationId!==a.operationId)throw Error('CONFLICT');const base=window.garancijeSavedAttachments.withoutEdit(r);if(await window.garancijeSavedAttachments.hash(base)!==r._attachmentEdit.postHash)throw Error('POST_CONFLICT');window.remRecord={...base,lastAttachmentOperation:{operationId:a.operationId,kind:'remove',attachmentId:r._attachmentEdit.targets[0].attachmentId}};window.remWrites++;return structuredClone(window.remRecord);}};",
    "window.remService=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-removal-dom',storage:localStorage,getUser:()=>window.firebaseDeps.auth.currentUser,metadataStore:window.remStore,authorize:async()=>({access_token:'synthetic-rem-only',expires_in:3600,scope:"+JSON.stringify(/const SCOPE = '([^']+)'/.exec(script)[1])+"}),fetch:async(u,init={})=>{const p=new URL(u).pathname;if(p==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:window.firebaseDeps.auth.currentUser.email}}));const id=decodeURIComponent(p.split('/').at(-1)),f=window.remFiles[id];if(p!=='/drive/v2/files/'+id||!f)throw Error('UNAPPROVED_REMOVAL_TARGET');if((init.method||'GET')==='GET'){window.remGets++;if(window.remHold)await new Promise(r=>window.remRelease=r);if(window.remGetStatus)return new Response('{}',{status:window.remGetStatus});return new Response(JSON.stringify({...f,title:f.name,fileSize:f.size,etag:'\"v'+f.v+'\"',labels:{trashed:f.trashed},parents:f.parents.map(id=>({id})),properties:Object.entries(f.appProperties).map(([key,value])=>({key,value,visibility:'PRIVATE'}))}));}if(init.method!=='PATCH'||id!=='synthetic_drive_file_2')throw Error('FIRST_FILE_MUTATION_FORBIDDEN');const b=JSON.parse(init.body);if(JSON.stringify(b)!==JSON.stringify({labels:{trashed:true}}))throw Error('UNAPPROVED_FIELDS');if(init.headers['If-Match']!=='\"v'+f.v+'\"')return new Response('{}',{status:412});window.remPatches.push(b);f.trashed=true;f.v++;return new Response(JSON.stringify({id:f.id,title:f.name}));}});window.attachmentService=window.remService;",
-   "function RemovalFixture(){const service=window.remService,user=window.firebaseDeps.auth.currentUser,initial=window.remBase,d=service.getDraft(user.uid);const [attachments,setAttachments]=useState(d.attachments),[pending,setPending]=useState(d.pending),[removing,setRemoving]=useState(false),[removalNotice,setRemovalNotice]=useState(''),[imageError,setImageError]=useState(''),[savedEditPending,setSavedEditPending]=useState(false),[probeKey,setProbeKey]=useState('initial');const form=d.metadata;window.setRemovalProbeKey=setProbeKey;const mounted=useRef(true),disposed=useRef(false),discardingRef=useRef(false),savingRef=useRef(false),processingRef=useRef(false),removingRef=useRef(false),stagingRef=useRef(false),stageTask=useRef(null),stageSequence=useRef(0),metadataBase=useRef(JSON.parse(d.expected)),draftRevisionRef=useRef(d.revision),draftPending=useRef(service.pendingFingerprint(d.pending)),stageAcknowledged=useRef(null),savedEditPendingRef=useRef(false);const acknowledgeDraft=n=>{draftRevisionRef.current=n.revision;draftPending.current=service.pendingFingerprint(n.pending);};",
+   "function RemovalFixture(){const service=window.remService,user=window.firebaseDeps.auth.currentUser,initial=window.remBase,d=service.getDraft(user.uid);const [attachments,setAttachments]=useState(d.attachments),[pending,setPending]=useState(d.pending),[removing,setRemoving]=useState(false),[removalNotice,setRemovalNotice]=useState(''),[imageError,setImageError]=useState(''),[savedEditPending,setSavedEditPending]=useState(false),[probeKey,setProbeKey]=useState('initial');const form=d.metadata;const [view,setView]=useState('form');window.setRemovalView=setView;const mounted=useRef(true),disposed=useRef(false),discardingRef=useRef(false),savingRef=useRef(false),processingRef=useRef(false),removingRef=useRef(false),stagingRef=useRef(false),stageTask=useRef(null),stageSequence=useRef(0),metadataBase=useRef(JSON.parse(d.expected)),draftRevisionRef=useRef(d.revision),draftPending=useRef(service.pendingFingerprint(d.pending)),stageAcknowledged=useRef(null),savedEditPendingRef=useRef(false);const acknowledgeDraft=n=>{draftRevisionRef.current=n.revision;draftPending.current=service.pendingFingerprint(n.pending);};",
    remHandlers,
-   "return <><AttachmentList attachments={attachments} user={user} onRemoveSaved={runSavedRemoval} removeDisabled={removing||savedEditPending} removalInspectionContext={{operationId:d.operationId,contentKey:probeKey}}/><p role='status'>{removalNotice}</p>{imageError&&<p role='alert'>{imageError}</p>}</>;}",
+   "return <>{view==='settings'?<><button type='button' onClick={()=>setView('form')}>Povratak u formu</button><AttachmentDiagnostics user={user} disabled={removing} draftStatus='draft'/></>:<><button type='button' onClick={()=>setView('settings')}>Podešavanja</button><AttachmentList attachments={attachments} user={user} onRemoveSaved={runSavedRemoval} removeDisabled={removing||savedEditPending}/><p role='status'>{removalNotice}</p>{imageError&&<p role='alert'>{imageError}</p>}</>}</>;}",
    "window.mountRemoval=async()=>{const user=window.firebaseDeps.auth.currentUser;await window.remService.authChanged(user);await window.remService.connect();await window.remService.stageDraft({userId:user.uid,id:'warranty-one',base:window.remRecord,metadata:{name:'KEEP REMOVAL UNSAVED'},attachments:window.remRecord.attachments,pending:[],operationId:'removal-dom-op',expectedRevision:window.remService.contentRevision(null)});window.domRoot.render(<RemovalFixture/>);};"
   ].join('\n');
   await page.addScriptTag({content:babel.transform(remSetup,{presets:[['react',{runtime:'classic'}]]}).code});await page.evaluate(()=>window.mountRemoval());
-  const targetCard=page.locator('.attachment').filter({has:page.getByText('Image-2.jpg',{exact:true})}),remProbe=targetCard.getByRole('button',{name:'Proveri uklanjanje - bez čuvanja',exact:true});
-  await remProbe.waitFor();const remJournalBefore=await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k);});
-  await remProbe.evaluate(e=>{e.click();e.click();});await targetCard.getByText('Jak V2 validator dostupan',{exact:true}).waitFor();
+  await page.setViewportSize({width:390,height:844});
+  const targetCard=page.locator('.attachment').filter({has:page.getByText('Image-2.jpg',{exact:true})});
+  await targetCard.waitFor();assert.equal(await page.getByRole('button',{name:'Proveri uklanjanje - bez čuvanja',exact:true}).count(),0);
+  const remJournalBefore=await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k);});
+  await page.getByRole('button',{name:'Podešavanja',exact:true}).click();
+  const diagnostics=page.getByRole('region',{name:'Dijagnostika priloga'}),openDiagnostics=diagnostics.getByRole('button',{name:'Otvori dijagnostiku priloga',exact:true});
+  await openDiagnostics.waitFor();assert.equal(await openDiagnostics.getAttribute('aria-expanded'),'false');assert.equal(await diagnostics.getByRole('combobox').count(),0);assert.equal(await page.evaluate(()=>window.remGets),0);
+  await openDiagnostics.click();const select=diagnostics.getByRole('combobox',{name:'Prilog za proveru',exact:true});assert.equal(await select.inputValue(),'');assert.equal(await diagnostics.getByRole('button',{name:'Proveri uklanjanje - bez čuvanja',exact:true}).count(),0);
+  await select.selectOption('attachment-2');assert.equal(await page.evaluate(()=>window.remGets),0);
+  const remProbe=diagnostics.getByRole('button',{name:'Proveri uklanjanje - bez čuvanja',exact:true});
+  await remProbe.evaluate(e=>{e.click();e.click();});await diagnostics.getByText('Jak V2 validator dostupan',{exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>window.remGets),1);assert.equal(await page.evaluate(()=>window.remWrites),0);assert.equal(await page.evaluate(()=>window.remPatches.length),0);
   assert.equal(await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k);}),remJournalBefore);
+  assert.ok(await select.evaluate(e=>e.getBoundingClientRect().width<=390));assert.ok((await remProbe.boundingBox()).height>=48);
   await page.evaluate(()=>{window.remHold=true;window.remRelease=null;});await remProbe.click();await page.waitForFunction(()=>typeof window.remRelease==='function');
-  await page.evaluate(()=>window.setRemovalProbeKey('changed-during-request'));await page.waitForTimeout(20);await page.evaluate(()=>{window.remHold=false;window.remRelease();});
-  await page.waitForFunction(()=>!document.querySelector('[aria-label="Provera uklanjanja priloga"] button').disabled);
-  assert.equal(await targetCard.getByText('Jak V2 validator dostupan',{exact:true}).count(),0);
-  await page.evaluate(()=>window.remGetStatus=403);await remProbe.click();await targetCard.getByRole('alert').waitFor();assert.ok((await targetCard.getByRole('alert').innerText()).includes('403/404'));
-  await page.evaluate(()=>window.remGetStatus=null);await remProbe.click();await targetCard.getByText('Jak V2 validator dostupan',{exact:true}).waitFor();
+  await select.selectOption('attachment-1');await page.evaluate(()=>{window.remHold=false;window.remRelease();});await page.waitForTimeout(25);
+  assert.equal(await diagnostics.getByText('Jak V2 validator dostupan',{exact:true}).count(),0);
+  await select.selectOption('attachment-2');await page.evaluate(()=>window.remGetStatus=403);await remProbe.click();await diagnostics.getByRole('alert').waitFor();assert.ok((await diagnostics.getByRole('alert').innerText()).includes('403/404'));
+  await page.evaluate(()=>window.remGetStatus=null);await remProbe.click();await diagnostics.getByText('Jak V2 validator dostupan',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Povratak u formu',exact:true}).click();await targetCard.waitFor();
+  assert.equal(await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k);}),remJournalBefore);
+  assert.equal(await page.getByRole('button',{name:'Proveri uklanjanje - bez čuvanja',exact:true}).count(),0);
   page.once('dialog',d=>d.dismiss());await targetCard.getByRole('button',{name:'Ukloni prilog',exact:true}).click();assert.equal(await page.evaluate(()=>window.remWrites),0);assert.equal(await page.evaluate(()=>window.remPatches.length),0);
   page.once('dialog',d=>{assert.ok(d.message().includes('Image-2.jpg'));assert.ok(d.message().includes('Odustani'));d.accept();});
   await targetCard.getByRole('button',{name:'Ukloni prilog',exact:true}).click();await page.getByText('Prilog je uklonjen iz garancije i potvrdjen u Drive korpi. Odustani ga ne vraca.',{exact:true}).waitFor({timeout:5000});
@@ -640,6 +653,42 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   assert.equal(await page.evaluate(()=>window.remFiles.synthetic_drive_file_1.trashed),false);assert.equal(await page.evaluate(()=>window.remFiles.synthetic_drive_file_2.trashed),true);assert.equal(await page.evaluate(()=>window.remService.getDraft('synthetic-owner').metadata.name),'KEEP REMOVAL UNSAVED');
   assert.deepEqual(await page.evaluate(()=>window.remPatches),[{labels:{trashed:true}}]);assert.equal(requests,0);
   console.log('DOM removal: exact second card, readonly zero writes, duplicate/stale/403 handling, cancel confirmation zero writes, confirmed single V2 trash, first ref and unsaved fields retained');
+
+
+  await page.addScriptTag({content:babel.transform("window.renderDiagnostics=status=>{window.attachmentService=window.remService;window.domRoot.render(<AttachmentDiagnostics user={window.firebaseDeps.auth.currentUser} draftStatus={status||'draft'}/>);};window.renderText=key=>{window.attachmentService=window.txtService;window.domRoot.render(<TextFixture key={key}/>);};",{presets:[['react',{runtime:'classic'}]]}).code});
+  await page.evaluate(()=>window.renderDiagnostics());const maintenance=page.getByRole('region',{name:'Dijagnostika priloga'});
+  await maintenance.getByRole('button',{name:'Otvori dijagnostiku priloga',exact:true}).click();const choice=maintenance.getByRole('combobox');await choice.selectOption('attachment-1');
+  const getsBeforeStale=await page.evaluate(()=>window.remGets);
+  await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom')),j=JSON.parse(localStorage.getItem(k));j.draft.revision++;localStorage.setItem(k,JSON.stringify(j));});
+  await maintenance.getByRole('button',{name:'Proveri uklanjanje - bez čuvanja',exact:true}).click();await page.waitForTimeout(25);
+  assert.equal(await page.evaluate(()=>window.remGets),getsBeforeStale);
+  await page.evaluate(()=>window.dispatchEvent(new StorageEvent('storage',{key:Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom')),storageArea:localStorage})));
+  await page.waitForFunction(()=>document.querySelector('[aria-label="Dijagnostika priloga"] select')?.value==='');
+  const stableDraftJournal=await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k);});
+  for(const bad of ['duplicate','none']){
+   await page.evaluate(bad=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom')),j=JSON.parse(localStorage.getItem(k));window.stableRemJournal=localStorage.getItem(k);if(bad==='none')j.draft=null;else j.draft.attachments.push({...j.draft.attachments[0]});localStorage.setItem(k,JSON.stringify(j));window.badRemJournal=localStorage.getItem(k);window.dispatchEvent(new StorageEvent('storage',{key:k,storageArea:localStorage}));},bad);
+   if(bad==='duplicate')await maintenance.getByRole('alert').waitFor();else await maintenance.getByText('Nema postojećeg nacrta. Dijagnostika ne pravi novi nacrt.',{exact:true}).waitFor();
+   assert.equal(await maintenance.getByRole('combobox').count(),0);assert.equal(await maintenance.getByRole('button',{name:'Proveri uklanjanje - bez čuvanja',exact:true}).count(),0);
+   assert.equal(await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k)===window.badRemJournal;}),true);
+   await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));localStorage.setItem(k,window.stableRemJournal);window.dispatchEvent(new StorageEvent('storage',{key:k,storageArea:localStorage}));});await maintenance.getByRole('combobox').waitFor();
+  }
+  await page.evaluate(()=>window.renderDiagnostics('error'));await maintenance.getByRole('alert').waitFor();assert.equal(await maintenance.getByRole('combobox').count(),0);
+  assert.equal(await page.evaluate(()=>window.remGets),getsBeforeStale);assert.equal(await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k);}),stableDraftJournal);
+  await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom'));window.completedTxtAudit=localStorage.getItem(k);window.renderText('finished');});await page.waitForTimeout(25);
+  assert.equal(await page.getByRole('region',{name:'Nedovršena Drive provera'}).count(),0);assert.equal(await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom'));return localStorage.getItem(k)===window.completedTxtAudit;}),true);
+  for(const bad of ['uncertain','malformed']){
+   await page.evaluate(bad=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom')),j=JSON.parse(window.completedTxtAudit);if(bad==='uncertain'){j.textExperiment.uncertain=true;j.textExperiment.inFlight=true;}else j.textExperiment.events={};localStorage.setItem(k,JSON.stringify(j));window.visibleTxtAudit=localStorage.getItem(k);window.renderText(bad);},bad);
+   if(bad==='uncertain'){const warning=page.getByRole('region',{name:'Nedovršena Drive provera'});await warning.waitFor();assert.equal(await warning.getByRole('button',{name:'Prikaži detalje i oporavak',exact:true}).count(),1);assert.equal(await warning.getByRole('table').count(),0);}
+   else await page.getByRole('alert').filter({hasText:'Stanje ranije Drive provere nije pouzdano'}).waitFor();
+   assert.equal(await page.getByRole('button',{name:'Pokreni izolovanu TXT proveru',exact:true}).count(),0);assert.equal(await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom'));return localStorage.getItem(k)===window.visibleTxtAudit;}),true);assert.equal(await page.evaluate(()=>window.txtCreates),1);
+  }
+  await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-txt-dom'));localStorage.setItem(k,window.completedTxtAudit);});
+  const savedRecoveryUi=html.slice(html.indexOf('        function SavedAttachmentRecovery('),html.indexOf('        function App('));
+  await page.addScriptTag({content:babel.transform(savedRecoveryUi+"window.renderPendingRemoval=()=>{window.attachmentService=window.remService;window.domRoot.render(<SavedAttachmentRecovery records={[{...window.remRecord,id:'warranty-one',_attachmentEdit:window.remLastOp}]} user={window.firebaseDeps.auth.currentUser} onOpen={()=>{}}/>);};",{presets:[['react',{runtime:'classic'}]]}).code});
+  const remWritesBeforeNotice=await page.evaluate(()=>window.remWrites);await page.evaluate(()=>window.renderPendingRemoval());
+  await page.getByRole('region',{name:'Nedovrsene izmene priloga'}).getByRole('button',{name:'Nastavi uklanjanje priloga',exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>window.remWrites),remWritesBeforeNotice);assert.equal(await page.evaluate(()=>window.remPatches.length),1);assert.equal(requests,0);
+  console.log('DOM production UI: closed mobile Settings, chosen existing draft only, no auto requests/writes, stale revision and ambiguous/missing context blocked, completed TXT hidden with audit retained, unknown/unfinished TXT and pending removal visibly recoverable');
 
  }finally{await browser.close();}
 });
@@ -1163,4 +1212,63 @@ test('removal preserves completed rename, old halted audit and finished TXT jour
 });
 test('readonly removal checks the exact journal draft/operation identity',async()=>{
  const h=await harness({patchStatus:412});await h.stage();await assert.rejects(h.remove());editJournal(h,j=>{const v=Object.values(j.attachmentEdits)[0];v.draftOperationId='unrelated-draft';});const before=clone(journalSnapshot(h));await assert.rejects(removalInspect(h));assert.deepEqual(journalSnapshot(h),before);assert.equal(h.patches().length,1);
+});
+
+const supportState=(h,operationId=null)=>JSON.parse(JSON.stringify(h.service.getAttachmentSupportState(h.user.uid,operationId)));
+const diagnosticContext=h=>vm.runInContext('('+html.slice(html.indexOf('        function attachmentDiagnosticContext('),html.indexOf('        function AttachmentDiagnostics('))+')',h.context)(h.service,h.user);
+test('UI support projection is readonly: absent state is not a new test or draft',async()=>{
+ const h=await harness(),before=clone(journalSnapshot(h)),calls=h.calls.length;assert.deepEqual(supportState(h),{text:'none',recovery:'none'});assert.equal(diagnosticContext(h).state,'none');
+ assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,calls);assert.equal(h.writes.length,0);
+});
+test('finished TXT disappears only after confirmed trash and its complete audit remains byte identical',async()=>{
+ const h=await txtHarness();await txtStart(h);assert.equal(supportState(h).text,'active');await txtTrash(h);const before=clone(journalSnapshot(h)),calls=h.calls.length;
+ assert.equal(supportState(h).text,'complete');assert.equal(h.service.getTextTrial(h.user.uid).phase,'trashed');assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,calls);
+});
+for(const bad of ['uncertain','in-flight','missing-proof','bad-phase','bad-events','wrong-owner'])test('support projection does not hide incomplete/unknown TXT '+bad,async()=>{
+ const h=await txtHarness();await txtStart(h);await txtTrash(h);
+ editJournal(h,j=>{const s=j.textExperiment;if(bad==='uncertain')s.uncertain=true;if(bad==='in-flight')s.inFlight=true;if(bad==='missing-proof')delete s.verified;if(bad==='bad-phase')s.phase='unexpected';if(bad==='bad-events')s.events={};if(bad==='wrong-owner')s.userId='other';});
+ const before=clone(journalSnapshot(h)),calls=h.calls.length;assert.equal(['active','unknown'].includes(supportState(h).text),true);assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,calls);
+});
+test('uncertain TXT remains active without retry/create and no projection mutation',async()=>{
+ const h=await txtHarness({txtValidLost:true});await assert.rejects(txtStart(h));const before=clone(journalSnapshot(h)),calls=h.calls.length;
+ assert.equal(supportState(h).text,'active');assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,calls);
+});
+test('halted recovery UI hides only completed linked recovery and preserves old500 evidence',async()=>{
+ const h=await haltedRecoveryHarness(),d=h.service.getDraft(h.user.uid);assert.equal(supportState(h,d.operationId).recovery,'active');
+ await h.service.recoverHaltedRename(recoverArgs(h));const before=clone(journalSnapshot(h)),calls=h.calls.length;
+ assert.equal(supportState(h,d.operationId).recovery,'complete');assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,calls);assert.equal(h.protectedState(),h.protectedSnapshot);
+});
+for(const bad of ['wrong-link','inconsistent-complete','unknown-phase','wrong-audit'])test('unknown recovery '+bad+' remains visible and never silently passes',async()=>{
+ const h=await haltedRecoveryHarness();await h.service.recoverHaltedRename(recoverArgs(h));const d=h.service.getDraft(h.user.uid);
+ editJournal(h,j=>{const r=j.renameRecoveries[d.operationId];if(bad==='wrong-link')r.oldOperationId='other';if(bad==='inconsistent-complete')r.complete=false;if(bad==='unknown-phase')r.phase='unexpected';if(bad==='wrong-audit')j.v2Trials[d.operationId].negativeStatus=200;});
+ const before=clone(journalSnapshot(h));assert.equal(supportState(h,d.operationId).recovery,'unknown');assert.deepEqual(journalSnapshot(h),before);
+});
+test('diagnostics context is existing-draft-only, preserves staged names and makes zero requests',async()=>{
+ const h=await harness();await h.stage({name:'UNSAVED RETAINED',attachments:[ref(1,'Staged.jpg'),ref(2)]});const before=clone(journalSnapshot(h)),calls=h.calls.length,c=diagnosticContext(h);
+ assert.equal(c.state,'ready');assert.equal(c.draft.metadata.name,'UNSAVED RETAINED');assert.equal(c.rows.length,2);assert.deepEqual(Array.from(c.renameIds),['attachment-1']);assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,calls);assert.equal(h.writes.length,0);
+});
+test('new draft diagnostics do not invent a saved warranty context or upload pending files',async()=>{
+ const h=await harness({records:new Map()}),picked=await originals();await newDraft(h,picked);const before=clone(journalSnapshot(h));assert.equal(diagnosticContext(h).state,'new');assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,0);assert.equal(h.writes.length,0);
+});
+for(const bad of ['duplicate-id','duplicate-file','bad-base','missing-file-id','foreign-intent'])test('diagnostic selector rejects ambiguous '+bad+' without writes',async()=>{
+ const h=await harness();await h.stage();editJournal(h,j=>{const d=j.draft;if(bad==='duplicate-id')d.attachments.push({...d.attachments[0]});if(bad==='duplicate-file')d.attachments.push({...d.attachments[0],id:'another'});if(bad==='bad-base')d.expected='null';if(bad==='missing-file-id')delete d.attachments[0].driveFileId;if(bad==='foreign-intent')j.attachmentEdits={[d.id]:{userId:'other',id:d.id,operation:{kind:'remove'}}};});
+ const before=clone(journalSnapshot(h));assert.throws(()=>diagnosticContext(h));assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,0);assert.equal(h.writes.length,0);
+});
+test('pending removal target remains selectable after unlink without restoring its reference',async()=>{
+ const h=await harness({patchStatus:412});await h.stage();await assert.rejects(h.remove());const before=clone(journalSnapshot(h)),calls=h.calls.length,c=diagnosticContext(h);
+ assert.equal(c.rows.some(x=>x.id==='attachment-1'),true);assert.equal(h.records.get('warranty-one').attachments.some(x=>x.id==='attachment-1'),false);assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,calls);
+});
+test('selected rename diagnostic reads only exact chosen staged attachment',async()=>{
+ const h=await harness();const d=await h.stage({attachments:[ref(1,'One-new.jpg'),ref(2,'Two-new.jpg')]}),before=clone(journalSnapshot(h));
+ const r=await h.service.inspectSavedRename({userId:h.user.uid,operationId:d.operationId,expectedRevision:d.revision,attachmentId:'attachment-2'});
+ assert.equal(r.length,1);assert.equal(r[0].attachmentId,'attachment-2');assert.ok(h.calls.every(c=>c.method==='GET'&&c.url.includes(ref(2).driveFileId)));assert.deepEqual(journalSnapshot(h),before);assert.equal(h.writes.length,0);
+ const calls=h.calls.length;await assert.rejects(h.service.inspectSavedRename({userId:h.user.uid,operationId:d.operationId,expectedRevision:d.revision,attachmentId:'not-selected'}));assert.equal(h.calls.length,calls);
+});
+test('everyday form has no historical test or per-attachment diagnostic mounts; active recovery remains',()=>{
+ const form=html.slice(html.indexOf('        function DraftForm('),html.indexOf('        const deletionFileMessage'));
+ assert.ok(!form.includes('<V2RenameTrial'));assert.ok(!form.includes('<RenameInspection'));assert.ok(!form.includes('<RemovalInspection'));
+ assert.ok(form.includes('<HaltedRenameRecovery'));assert.ok(form.includes('<TextConcurrencyTrial'));assert.ok(form.includes('Nastavi uklanjanje priloga'));assert.ok(form.includes('Pregled razlika'));
+ assert.ok(html.includes('<AttachmentDiagnostics user={user} disabled={formBusy} draftStatus={currentDraftStatus}/>'));
+ const txt=html.slice(html.indexOf('        function TextConcurrencyTrial('),html.indexOf('        function HaltedRenameRecovery('));
+ assert.ok(!txt.includes('perform(\'start\')'));assert.ok(!txt.includes('Pokreni izolovanu TXT proveru'));assert.ok(txt.includes('Prikaži detalje i oporavak'));
 });
