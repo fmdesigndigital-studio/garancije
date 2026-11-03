@@ -1480,3 +1480,118 @@ test('Chromium two-tab version upgrade preserves literal sealed journal and old 
   console.log('DOM upgrade .4 to candidate: two pages/same origin, sealed operation and literal journal/audits unchanged, old synthetic File identity/content retained; no autosave, image read or OAuth by diagnostic; disconnected result, single GET, stale unmount hidden; 320/390/430 touch targets. Android memory eviction remains unproven.');
  }finally{await browser.close();}
 });
+
+
+
+// Temporary gallery byte copies. Every image here is synthetic; no user's files are opened.
+const galleryCode=html.slice(html.indexOf('        const galleryImages = (() => {'),html.indexOf('        // All coordinates refer to the browser-oriented image;'));
+function syntheticPng(marker=1){const b=new Uint8Array(34),v=new DataView(b.buffer);v.setUint32(0,0x89504e47);v.setUint32(4,0x0d0a1a0a);v.setUint32(8,13);v.setUint32(12,0x49484452);v.setUint32(16,2);v.setUint32(20,2);b[33]=marker;return b;}
+class ExpiringGalleryFile extends File {
+ constructor(bytes,name='Synthetic.png'){super([bytes],name,{type:'image/png'});this.unreadable=false;this.reads=0;this.changed=null;this.afterRead=null;}
+ async arrayBuffer(){this.reads++;if(this.unreadable)throw new DOMException('Synthetic provider permission lost','NotReadableError');const b=this.changed?this.changed.slice().buffer:await super.arrayBuffer();this.afterRead?.();return b;}
+}
+function loadGallery(h){
+ const urls=new Map(),revoked=[];let next=0;
+ class SyntheticURL extends URL{static createObjectURL(blob){assert.ok(blob instanceof Blob);const id='blob:synthetic-gallery-'+(++next);urls.set(id,blob);return id;}static revokeObjectURL(id){revoked.push(id);urls.delete(id);}}
+ class SyntheticImage{constructor(){this.naturalWidth=2;this.naturalHeight=2;}set src(value){if(value)queueMicrotask(()=>this.onload?.());}}
+ const document={createElement(name){assert.equal(name,'canvas');return {width:0,height:0,getContext(){return {fillRect(){},drawImage(){}};},toBlob(done){done(new Blob(['SYNTHETIC_THUMBNAIL'],{type:'image/jpeg'}));}};}};
+ Object.assign(h.context,{ArrayBuffer,DataView,URL:SyntheticURL,Image:SyntheticImage,document,queueMicrotask,attachmentNames:h.window.attachmentNames});
+ vm.runInContext(galleryCode+'\nwindow.syntheticGallery=galleryImages;',h.context);
+ return {gallery:h.window.syntheticGallery,urls,revoked};
+}
+test('gallery regression reproduces native File loss in real first save before any ID reservation',async()=>{
+ const h=await harness({records:new Map(),uploads:true}),{gallery}=loadGallery(h),file=new ExpiringGalleryFile(syntheticPng());
+ const row=(await gallery.plan([file],[]))[0],prepared=await gallery.read(row.file,{sha256:row.sha256});
+ // Version .5 retained this exact native provider object as attachment.original.
+ const oldAttachment={...prepared,original:file};const d=await newDraft(h,[oldAttachment]);file.unreadable=true;
+ await assert.rejects(h.service.saveWarranty(saveArgs(h,d,[oldAttachment])),e=>e.name==='NotReadableError');
+ assert.equal(h.calls.filter(c=>/generateIds|upload/.test(c.url)).length,0);assert.equal(h.writes.length,0);assert.equal(h.remote.size,0);
+ assert.equal(Object.keys(JSON.parse(journalBytes(h)).jobs).length,0);assert.equal(h.service.getDraft(h.user.uid).saveState.phase,'external');
+});
+test('gallery independent original preserves every byte/hash/MIME after provider File becomes unreadable and saves once',async()=>{
+ const h=await harness({records:new Map(),uploads:true}),{gallery}=loadGallery(h),bytes=syntheticPng(2),file=new ExpiringGalleryFile(bytes);
+ const row=(await gallery.plan([file],[]))[0],a=await gallery.read(row.file,{sha256:row.sha256});
+ assert.notEqual(a.original,file);assert.ok(a.original instanceof Blob);assert.equal(a.original.type,file.type);assert.equal(a.original.size,file.size);assert.equal(a.name,file.name);
+ const reads=file.reads;file.unreadable=true;await assert.rejects(file.arrayBuffer(),e=>e.name==='NotReadableError');
+ assert.deepEqual(new Uint8Array(await a.original.arrayBuffer()),bytes);assert.equal(await h.service.sha256(a.original),row.sha256);
+ const d=await newDraft(h,[a]);await h.service.saveWarranty(saveArgs(h,d,[a]));
+ assert.equal(file.reads,reads+1);assert.equal(h.calls.filter(c=>c.method==='PUT').length,1);assert.equal(h.writes.length,1);assert.equal(h.remote.size,1);
+ const saved=h.records.get(d.id);assert.equal(saved.attachments[0].sha256,row.sha256);assert.equal(saved.attachmentCount,1);assert.deepEqual(saved.attachmentNames,[a.name]);
+ assert.equal(h.service.getDraft(h.user.uid),null);assert.ok(!journalBytes(h).includes('SYNTHETIC_THUMBNAIL'));
+});
+test('gallery selects two copies, removes first with real service, and first save uploads only retained second bytes',async()=>{
+ const h=await harness({records:new Map(),uploads:true}),{gallery}=loadGallery(h),files=[new ExpiringGalleryFile(syntheticPng(3),'A.png'),new ExpiringGalleryFile(syntheticPng(4),'B.png')];
+ const rows=await gallery.plan(files,[]),prepared=[];for(const row of rows)prepared.push(await gallery.read(row.file,{sha256:row.sha256}));
+ let d=await h.service.stageDraft({userId:h.user.uid,base:null,metadata:{name:'Synthetic two gallery images',purchaseDate:'2026-11-03',baseMonths:12},attachments:[],pending:prepared,operationId:'gallery-two-operation',expectedRevision:h.service.contentRevision(null)});
+ const removed=await h.service.removePendingAttachment({userId:h.user.uid,operationId:d.operationId,attachmentId:prepared[0].id,expectedRevision:d.revision,expectedPending:h.service.pendingFingerprint(d.pending),expectedMetadata:d.metadata,expectedAttachments:d.attachments,isCurrent:()=>true});
+ assert.equal(removed.draft.pending.length,1);assert.equal(removed.draft.pending[0].id,prepared[1].id);assert.equal(h.calls.length,0);assert.equal(h.writes.length,0);
+ gallery.release(prepared[0]);files.forEach(f=>f.unreadable=true);
+ const b={...prepared[1],...removed.draft.pending[0]};d=await h.service.stageDraft({userId:h.user.uid,base:null,metadata:removed.draft.metadata,attachments:[],pending:[b],operationId:d.operationId,expectedRevision:removed.draft.revision,seal:true});
+ const bytesBefore=journalBytes(h);assert.ok(!/original|dataUrl|thumbnailUrl|SYNTHETIC_THUMBNAIL/.test(bytesBefore));
+ await h.service.saveWarranty(saveArgs(h,d,[b]));assert.equal(h.calls.filter(c=>c.method==='PUT').length,1);assert.equal(h.writes.length,1);assert.equal(h.remote.size,1);
+ const saved=h.records.get(d.id);assert.equal(saved.name,'Synthetic two gallery images');assert.equal(saved.attachments[0].id,b.id);assert.equal(saved.attachments[0].sha256,rows[1].sha256);assert.equal(saved.attachmentCount,1);assert.deepEqual(saved.attachmentNames,[b.name]);
+ assert.ok(![...h.remote.values()].some(f=>f.appProperties.sha256===rows[0].sha256));
+});
+for(const mode of ['unreadable','hash-changed','size-changed','cancelled'])test('gallery byte copy rejects '+mode+' before acceptance or writes',async()=>{
+ const h=await harness({records:new Map(),uploads:true}),{gallery,urls}=loadGallery(h),file=new ExpiringGalleryFile(syntheticPng(5)),controller=new AbortController();
+ const row=(await gallery.plan([file],[]))[0];
+ if(mode==='unreadable')file.unreadable=true;
+ if(mode==='hash-changed')file.changed=syntheticPng(6);
+ if(mode==='size-changed')file.changed=new Uint8Array(1);
+ if(mode==='cancelled')file.afterRead=()=>controller.abort();
+ await assert.rejects(gallery.read(file,{sha256:row.sha256,signal:controller.signal}));assert.equal(urls.size,0);assert.equal(h.calls.length,0);assert.equal(h.writes.length,0);assert.equal(h.service.getDraft(h.user.uid),null);
+});
+test('gallery byte copy owns source buffer; subsequent source buffer mutation cannot change attachment',async()=>{
+ const h=await harness({records:new Map()}),{gallery}=loadGallery(h),bytes=syntheticPng(7),file=new ExpiringGalleryFile(bytes);
+ const row=(await gallery.plan([file],[]))[0],buffer=bytes.slice().buffer;file.arrayBuffer=async()=>buffer;
+ const a=await gallery.read(file,{sha256:row.sha256});new Uint8Array(buffer).fill(0);
+ assert.deepEqual(new Uint8Array(await a.original.arrayBuffer()),bytes);assert.equal(await h.service.sha256(a.original),row.sha256);
+});
+test('gallery copy preserves selection/file/batch/count/total limits and duplicate semantics',async()=>{
+ const h=await harness({records:new Map()}),{gallery}=loadGallery(h),small=()=>new ExpiringGalleryFile(syntheticPng());
+ const six=Array.from({length:6},small);await assert.rejects(gallery.plan(six,[]),/5 slika/);assert.ok(six.every(f=>f.reads===0));
+ const large=new ExpiringGalleryFile(new Uint8Array(gallery.limits.file+1));await assert.rejects(gallery.plan([large],[]),/10 MiB/);assert.equal(large.reads,0);
+ await assert.rejects(gallery.read(large,{sha256:'a'.repeat(64)}),/10 MiB/);assert.equal(large.reads,0);
+ const batch=Array.from({length:4},(_,i)=>{const b=new Uint8Array(8*1024*1024);b[0]=i;return new ExpiringGalleryFile(b);});await assert.rejects(gallery.plan(batch,[]),/30 MiB/);
+ const pending=Array.from({length:10},(_,i)=>({id:'old-'+i,sha256:'a'.repeat(64),mime:'image/png',size:1}));await assert.rejects(gallery.plan([small()],pending),/10 novih/);
+ await assert.rejects(gallery.plan([small()],[{id:'old',sha256:'a'.repeat(64),mime:'image/png',size:gallery.limits.total}]),/50 MiB/);
+ const f=small();assert.equal((await gallery.plan([f,new ExpiringGalleryFile(syntheticPng(),'Same bytes.png')],[])).length,1);
+ assert.equal(h.calls.length,0);assert.equal(h.writes.length,0);
+});
+test('gallery exact known oversized legacy reselect keeps existing exception and same identity',async()=>{
+ const h=await harness({records:new Map()}),{gallery}=loadGallery(h),file=new ExpiringGalleryFile(new Uint8Array(gallery.limits.file+1),'Legacy.png'),sha256=await h.service.sha256(file);
+ const saved={id:'old-id',name:'Retained legacy name.png',sha256,mime:file.type,size:file.size};const rows=await gallery.plan([file],[saved]);assert.equal(rows[0].matches.length,1);
+ const a=await gallery.read(file,{sha256,reselect:true}),reattached=h.window.attachmentNames.reselect(saved,a);file.unreadable=true;
+ assert.equal(reattached.id,saved.id);assert.equal(reattached.name,saved.name);assert.equal(await h.service.sha256(reattached.original),sha256);assert.notEqual(reattached.original,file);
+});
+test('gallery byte copy remains memory-only; reloaded journal still requires exact original',async()=>{
+ const h=await harness({records:new Map(),uploads:true}),{gallery}=loadGallery(h),file=new ExpiringGalleryFile(syntheticPng(8)),row=(await gallery.plan([file],[]))[0],a=await gallery.read(file,{sha256:row.sha256}),d=await newDraft(h,[a]);
+ const before=journalBytes(h),reloaded=await harness({storage:h.storage,records:h.records,remote:h.remote,uploads:true});assert.equal(journalBytes(h),before);assert.equal(reloaded.service.getDraft(h.user.uid).pending[0].original,undefined);
+ await assert.rejects(reloaded.service.saveWarranty(saveArgs(reloaded,d)),/Ponovo izaberite original/);assert.equal(reloaded.writes.length,0);assert.equal(reloaded.remote.size,0);
+});
+
+test('Chromium gallery decoder uses verified independent bytes after native File access is revoked',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
+ const {createRequire}=await import('node:module'),pw=createRequire(import.meta.url)(process.env.GP_PLAYWRIGHT_PATH),browser=await pw.chromium.launch({headless:true,...(process.env.GP_CHROMIUM_PATH?{executablePath:process.env.GP_CHROMIUM_PATH}:{})});
+ try{
+  const page=await browser.newPage();let requests=0;await page.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<div></div>'}):(requests++,r.abort()));await page.goto('http://localhost/');await page.addScriptTag({content:script});
+  await page.addScriptTag({content:'const attachmentNames=window.attachmentNames;\n'+galleryCode+'\nwindow.syntheticGallery=galleryImages;'});
+  const result=await page.evaluate(async()=>{
+   const gallery=window.syntheticGallery,files=[],originals=[],failures=[];
+   for(let i=0;i<2;i++){
+    const canvas=document.createElement('canvas');canvas.width=3;canvas.height=2;const ctx=canvas.getContext('2d');ctx.fillStyle=i?'#456789':'#abc123';ctx.fillRect(0,0,3,2);
+    const blob=await new Promise(r=>canvas.toBlob(r,'image/png')),file=new File([blob],'Synthetic-'+i+'.png',{type:'image/png'}),native=file.arrayBuffer.bind(file);let unavailable=false;
+    Object.defineProperty(file,'arrayBuffer',{value:()=>unavailable?Promise.reject(new DOMException('Synthetic access lost','NotReadableError')):native()});
+    files.push(file);originals.push(new Uint8Array(await native()));failures.push(()=>unavailable=true);
+   }
+   const rows=await gallery.plan(files,[]),a=[];for(const row of rows)a.push(await gallery.read(row.file,{sha256:row.sha256}));failures.forEach(f=>f());
+   const checks=[];for(let i=0;i<a.length;i++){
+    let rejected=false;try{await files[i].arrayBuffer();}catch(e){rejected=e.name==='NotReadableError';}
+    const bytes=new Uint8Array(await a[i].original.arrayBuffer()),image=new Image();image.src=a[i].dataUrl;await image.decode();
+    checks.push({rejected,independent:a[i].original!==files[i],hashMatches:await window.attachmentService.sha256(a[i].original)===rows[i].sha256,sameBytes:bytes.length===originals[i].length&&bytes.every((v,n)=>v===originals[i][n]),mime:a[i].original.type,width:image.naturalWidth,height:image.naturalHeight,thumbnail:!!a[i].thumbnailUrl});
+    gallery.release(a[i]);image.src='';
+   }return checks;
+  });
+  assert.deepEqual(result,Array.from({length:2},()=>({rejected:true,independent:true,hashMatches:true,sameBytes:true,mime:'image/png',width:3,height:2,thumbnail:true})));assert.equal(requests,0);
+  console.log('DOM gallery: actual PNG decode/thumbnail/object URLs, two native Files revoked after prepare, same bytes/hash/MIME retained independently, no network. No Android-provider or reload persistence claim.');
+ }finally{await browser.close();}
+});

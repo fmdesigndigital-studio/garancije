@@ -2351,13 +2351,34 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                 return rows;
             };
             const release=a=>{for(const url of [a?.dataUrl,a?.thumbnailUrl])if(url)URL.revokeObjectURL(url);};
+            // Eagerly read the provider-backed File while it is available. Blob([file]) alone
+            // can retain the provider reference; copy its actual bytes and verify the planned hash.
+            const snapshotOriginal=async(file,expectedHash,signal)=>{
+                check(signal);supported(file);
+                if(typeof expectedHash!=='string'||!/^[a-f0-9]{64}$/.test(expectedHash))throw Error('Identitet izabrane slike nije potvrđen. Slika nije dodata.');
+                const size=file.size,mime=file.type;
+                let bytes;
+                try{bytes=await file.arrayBuffer();}
+                catch(error){check(signal);throw Error('Izvorna slika više nije čitljiva. Izaberite je ponovo; nije dodata niti poslata.');}
+                check(signal);
+                if(!(bytes instanceof ArrayBuffer)||bytes.byteLength!==size)throw Error('Veličina izabrane slike se promenila. Slika nije dodata.');
+                const original=new Blob([bytes],{type:mime});
+                // Release this temporary read buffer before preview decoding. The Blob owns its bytes.
+                bytes=null;
+                const actual=await window.attachmentService.sha256(original);check(signal);
+                if(original.size!==size||original.type!==mime||actual!==expectedHash)throw Error('Izabrana slika se promenila tokom pripreme. Slika nije dodata.');
+                return original;
+            };
             const read=async(file,{signal,sha256,reselect=false}={})=>{
-                check(signal);supported(file);let decodeUrl,image,canvas,dataUrl,thumbnailUrl;
+                check(signal);supported(file);
+                if(file.size>limits.file&&!reselect)throw Error('Nova slika može imati najviše 10 MiB. Prethodni prilozi ostaju.');
+                const original=await snapshotOriginal(file,sha256,signal);
+                let decodeUrl,image,canvas,dataUrl,thumbnailUrl;
                 try{
                     // Old draft originals may exceed new intake limits. Reattach exact bytes without decoding them.
                     if(!reselect||file.size<=limits.file){
-                        await preflight(file,signal);check(signal);
-                        decodeUrl=URL.createObjectURL(file);
+                        await preflight(original,signal);check(signal);
+                        decodeUrl=URL.createObjectURL(original);
                         image=await new Promise((resolve,reject)=>{
                             const img=new Image(),cancel=()=>{img.onload=img.onerror=null;img.src='';reject(new DOMException('Priprema je otkazana.','AbortError'));};
                             const finish=fn=>{signal?.removeEventListener('abort',cancel);img.onload=img.onerror=null;fn();};
@@ -2381,8 +2402,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if(image)image.src='';if(decodeUrl)URL.revokeObjectURL(decodeUrl);if(canvas){canvas.width=0;canvas.height=0;}
                 }
                 try{
-                    check(signal);dataUrl=URL.createObjectURL(file);
-                    return {id:crypto.randomUUID(),name:file.name,kind:'Račun',mime:file.type,size:file.size,original:file,sha256,dataUrl,thumbnailUrl:thumbnailUrl||null,autoNamed:true,nameCustom:false,extension:attachmentNames.extension(file.type,file.name)};
+                    check(signal);dataUrl=URL.createObjectURL(original);
+                    return {id:crypto.randomUUID(),name:file.name,kind:'Račun',mime:file.type,size:file.size,original,sha256,dataUrl,thumbnailUrl:thumbnailUrl||null,autoNamed:true,nameCustom:false,extension:attachmentNames.extension(file.type,file.name)};
                 }catch(error){release({dataUrl,thumbnailUrl});throw error;}
             };
             return {limits,plan,read,release,preflight,dimensions};
@@ -2805,7 +2826,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.03.5';
+        const RELEASE_VERSION = '2026.11.03.6';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
