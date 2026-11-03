@@ -19,7 +19,7 @@ async function harness(config={}){
  const user={uid:'synthetic-owner',email:''};
  let clock=1000;
  const d={db:{},appId:'synthetic-app',auth:{currentUser:user},deleteField:()=>DELETE,
-  doc(...p){return {id:p.at(-1)};},collection(){return {};},async getDocFromServer(r){return {exists:()=>records.has(r.id),data:()=>clone(records.get(r.id))};},
+  doc(...p){return {id:p.at(-1)};},collection(){return {};},async getDocFromServer(r){if(config.activeInspection){(config.inspectionReads??=[]).push(r.id);if(config.inspectionReadError)throw Error('SYNTHETIC_SECRET_ERROR');}return {exists:()=>records.has(r.id),data:()=>clone(records.get(r.id))};},
   async getDocsFromServer(){return {docs:[...records].map(([id,value])=>({id,data:()=>clone(value)}))};},
   async runTransaction(db,fn){
    const pending=[],readVersions=new Map();const tx={async get(r){config.onGet?.(r.id,records);readVersions.set(r.id,JSON.stringify(records.get(r.id)));return {exists:()=>records.has(r.id),data:()=>clone(records.get(r.id))};},
@@ -52,6 +52,13 @@ async function harness(config={}){
  const uploads=new Map();let generated=0;
  const send=async(url,init={})=>{
   calls.push({url,method:init.method??'GET',body:init.body,headers:init.headers});const u=new URL(url);
+  if(config.activeInspection&&u.pathname!=='/drive/v3/about'){
+   assert.equal(init.method??'GET','GET');assert.equal(u.searchParams.has('alt'),false);assert.ok(!/generateIds|upload/.test(u.pathname));
+   await config.onInspection?.();if(config.inspectionOffline)throw Error('SYNTHETIC_SECRET_ERROR');
+   if(config.inspectionStatus)return new Response(JSON.stringify({error:{message:'SYNTHETIC_SECRET_ERROR'}}),{status:config.inspectionStatus});
+   if(u.pathname==='/drive/v3/files'){const page=u.searchParams.has('pageToken')?1:0;return new Response(JSON.stringify((config.inspectionPages||[{files:[]}])[page]));}
+   const f=remote.get(u.pathname.split('/').at(-1));return new Response(JSON.stringify(f||{}),{status:f?200:404});
+  }
   if(config.txtEnabled){
    if(u.pathname==='/drive/v3/files/generateIds'){if(config.txtIdLost)throw Error('ID_RESPONSE_LOST');return new Response(JSON.stringify({ids:['synthetic_txt_'+(++generated)]}));}
    if(u.pathname==='/upload/drive/v3/files'){
@@ -1250,7 +1257,7 @@ test('readonly removal checks the exact journal draft/operation identity',async(
 });
 
 const supportState=(h,operationId=null)=>JSON.parse(JSON.stringify(h.service.getAttachmentSupportState(h.user.uid,operationId)));
-const diagnosticContext=h=>vm.runInContext('('+html.slice(html.indexOf('        function attachmentDiagnosticContext('),html.indexOf('        function AttachmentDiagnostics('))+')',h.context)(h.service,h.user);
+const diagnosticContext=h=>vm.runInContext('('+html.slice(html.indexOf('        function attachmentDiagnosticContext('),html.indexOf('        function ActiveSaveInspection('))+')',h.context)(h.service,h.user);
 test('UI support projection is readonly: absent state is not a new test or draft',async()=>{
  const h=await harness(),before=clone(journalSnapshot(h)),calls=h.calls.length;assert.deepEqual(supportState(h),{text:'none',recovery:'none'});assert.equal(diagnosticContext(h).state,'none');
  assert.deepEqual(journalSnapshot(h),before);assert.equal(h.calls.length,calls);assert.equal(h.writes.length,0);
@@ -1306,4 +1313,170 @@ test('everyday form has no historical test or per-attachment diagnostic mounts; 
  assert.ok(html.includes('<AttachmentDiagnostics user={user} disabled={formBusy} draftStatus={currentDraftStatus}/>'));
  const txt=html.slice(html.indexOf('        function TextConcurrencyTrial('),html.indexOf('        function HaltedRenameRecovery('));
  assert.ok(!txt.includes('perform(\'start\')'));assert.ok(!txt.includes('Pokreni izolovanu TXT proveru'));assert.ok(txt.includes('Prikaži detalje i oporavak'));
+});
+
+
+
+
+
+
+
+// Active sealed Save inspection: fixtures only, never the real browser journal or Drive.
+const activeArgs=(h,d=h.service.getDraft(h.user.uid),isCurrent=()=>true)=>({userId:h.user.uid,operationId:d.operationId,expectedRevision:d.revision,expectedSnapshot:h.window.garancijeFingerprint(d),isCurrent});
+const uploadKey=async d=>Buffer.from(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode('upload:'+d.operationId+':'+d.pending[0].sha256))).toString('hex');
+async function activeHarness(config={}){
+ const h=await harness({records:new Map(),activeInspection:true,...config}),picked=await originals();
+ const d=await newDraft(h,[picked[1]]);editJournal(h,j=>j.draft.saveState={version:1,phase:'external'});
+ h.key=await uploadKey(d);h.picked=picked;
+ h.found={id:'synthetic_inspected_file',name:d.pending[0].name,mimeType:d.pending[0].mime,size:String(d.pending[0].size),
+  appProperties:{app:'garancije-pro',operation:h.key,sha256:d.pending[0].sha256},ownedByMe:true,shared:false,
+  permissions:[{type:'user',role:'owner',emailAddress:h.user.email}],trashed:false};
+ return h;
+}
+function journalBytes(h){return [...h.storage.data.entries()].find(([k])=>k.startsWith('garancije-drive-integration-v1:'))[1];}
+for(const state of ['none','reserved','uncertain','confirmed'])test('active Save inspection '+state+' reads only exact operation metadata and preserves literal journal',async()=>{
+ const h=await activeHarness();h.config.inspectionPages=[{files:[h.found]}];h.remote.set(h.found.id,h.found);
+ if(state!=='none')editJournal(h,j=>j.jobs[h.key]={id:h.found.id,state});
+ const before=journalBytes(h),records=JSON.stringify([...h.records]),files=JSON.stringify([...h.remote]);
+ const r=await h.service.inspectActiveSave(activeArgs(h));assert.equal(r.complete,true);assert.equal(r.firebaseStatus,'absent');assert.equal(r.phase,'external');
+ assert.equal(r.rows.length,1);assert.equal(r.rows[0].jobState,state);assert.equal(r.rows[0].driveStatus,'verified');
+ assert.equal(journalBytes(h),before);assert.equal(JSON.stringify([...h.records]),records);assert.equal(JSON.stringify([...h.remote]),files);assert.equal(h.writes.length,0);
+ assert.ok(h.calls.every(c=>c.method==='GET'&&!new URL(c.url).searchParams.has('alt')));
+ const list=h.calls.filter(c=>new URL(c.url).pathname==='/drive/v3/files');assert.equal(list.length,1);
+ const u=new URL(list[0].url);assert.equal(u.searchParams.get('q'),"appProperties has { key='operation' and value='"+h.key+"' }");
+ assert.ok(!u.searchParams.get('q').includes('parents')&&!u.searchParams.get('q').includes('trashed'));
+ assert.ok(!/Authorization|synthetic-token|sha256|appProperties|operationHash|uploadURL|dataUrl|original/.test(JSON.stringify(r)));
+ assert.ok(h.config.inspectionReads.every(id=>id===r.draftId));assert.equal(h.config.inspectionReads.length,2);
+});
+for(const status of ['absent','same_operation','conflict'])test('active Save exact Firebase document '+status+' is reported without finalize or draft clearing',async()=>{
+ const h=await activeHarness({inspectionPages:[{files:[]}]}),d=h.service.getDraft(h.user.uid);
+ if(status!=='absent')h.records.set(d.id,{name:'Saved',lastOperation:status==='same_operation'?d.operationId:'different-operation',attachments:[],attachmentCount:0,attachmentNames:[]});
+ const before=journalBytes(h),r=await h.service.inspectActiveSave(activeArgs(h));assert.equal(r.firebaseStatus,status);assert.equal(r.rows[0].driveStatus,'no_accessible_files');assert.equal(r.complete,true);
+ assert.equal(journalBytes(h),before);assert.equal(h.writes.length,0);assert.equal(h.service.getDraft(h.user.uid).sealed,true);
+});
+for(const branch of ['trashed','moved','multiple','pagination','known404','403','offline','incomplete','malformed','identity','repeated-page','duplicate-page','limit'])test('active Save inspection '+branch+' never confuses unknown or ambiguous with a safe retry',async()=>{
+ const h=await activeHarness();h.config.inspectionPages=[{files:[]}];let expected='unknown',complete=false;
+ if(branch==='trashed'||branch==='moved'){h.config.inspectionPages=[{files:[{...h.found,...(branch==='trashed'?{trashed:true}:{parents:['moved-folder']})}]}];expected=branch==='trashed'?'trashed':'verified';complete=true;}
+ if(branch==='multiple'){h.config.inspectionPages=[{files:[h.found,{...h.found,id:'synthetic_second_match'}]}];expected='ambiguous';}
+ if(branch==='pagination'){h.config.inspectionPages=[{files:[],nextPageToken:'next'},{files:[h.found]}];expected='verified';complete=true;}
+ if(branch==='known404'){editJournal(h,j=>j.jobs[h.key]={id:h.found.id,state:'uncertain'});expected='not_accessible';}
+ if(branch==='403')h.config.inspectionStatus=403;
+ if(branch==='offline')h.config.inspectionOffline=true;
+ if(branch==='incomplete')h.config.inspectionPages=[{files:[],incompleteSearch:true}];
+ if(branch==='malformed')h.config.inspectionPages=[{}];
+ if(branch==='identity')h.config.inspectionPages=[{files:[{...h.found,ownedByMe:false}]}];
+ if(branch==='repeated-page')h.config.inspectionPages=[{files:[],nextPageToken:'next'},{files:[],nextPageToken:'next'}];
+ if(branch==='duplicate-page')h.config.inspectionPages=[{files:[h.found],nextPageToken:'next'},{files:[h.found]}];
+ if(branch==='limit')h.config.inspectionPages=[{files:Array.from({length:101},(_,i)=>({...h.found,id:'synthetic_many_'+i}))}];
+ const before=journalBytes(h),r=await h.service.inspectActiveSave(activeArgs(h));assert.equal(r.rows[0].driveStatus,expected);assert.equal(r.complete,complete);assert.equal(journalBytes(h),before);assert.equal(h.writes.length,0);
+ assert.ok(h.calls.every(c=>c.method==='GET'));assert.ok(!JSON.stringify(r).includes('SYNTHETIC_SECRET_ERROR'));
+});
+test('active Save malformed Firebase document, malformed jobs and overall deadline remain fail-closed',async()=>{
+ for(const mode of ['firebase','jobs','deadline']){
+  const h=await activeHarness({inspectionPages:[{files:[]}]}),d=h.service.getDraft(h.user.uid);
+  if(mode==='firebase')h.records.set(d.id,[]);
+  if(mode==='jobs')editJournal(h,j=>j.jobs=[]);
+  if(mode==='deadline')h.config.onInspection=()=>h.expire();
+  const before=journalBytes(h);await assert.rejects(h.service.inspectActiveSave(activeArgs(h)));assert.equal(journalBytes(h),before);assert.equal(h.writes.length,0);
+ }
+});
+for(const branch of ['owner','operation','revision','job','discarded','firebase-change','ui-closed'])test('active Save inspection rejects '+branch+' changes rather than displaying stale evidence',async()=>{
+ const h=await activeHarness({inspectionPages:[{files:[]}]}),before=journalBytes(h);let current=true;
+ h.config.onInspection=()=>{
+  if(branch==='owner')h.window.firebaseDeps.auth.currentUser={uid:'other',email:h.user.email};
+  else if(branch==='firebase-change')h.records.set(h.service.getDraft(h.user.uid).id,{lastOperation:'different'});
+  else if(branch==='ui-closed')current=false;
+  else editJournal(h,j=>{if(branch==='operation')j.draft.operationId='different';if(branch==='revision')j.draft.revision++;if(branch==='job')j.jobs.changed={id:'synthetic_other',state:'reserved'};if(branch==='discarded')j.discardedDrafts={[j.draft.operationId]:true};});
+ };
+ await assert.rejects(h.service.inspectActiveSave(activeArgs(h,undefined,()=>current)));assert.equal(h.writes.length,0);assert.ok(h.calls.every(c=>c.method==='GET'));
+ if(['firebase-change','ui-closed','owner'].includes(branch))assert.equal(journalBytes(h),before);
+});
+test('active Save inspection fails immediately under Save lock, duplicate click, invalid context and unavailable session',async()=>{
+ const lockMap=new Map(),h=await activeHarness({lockMap,inspectionPages:[{files:[]}]}),before=journalBytes(h);
+ const namespace=[...h.storage.data.keys()].find(k=>k.startsWith('garancije-drive-integration-v1:'));lockMap.set(namespace,Promise.resolve());
+ await assert.rejects(h.service.inspectActiveSave(activeArgs(h)),e=>e.code==='SAVE_INSPECTION_BUSY');assert.equal(h.calls.length,0);lockMap.delete(namespace);
+ let release;h.config.onInspection=()=>new Promise(r=>release=r);
+ const first=h.service.inspectActiveSave(activeArgs(h));while(!release)await new Promise(r=>setImmediate(r));
+ await assert.rejects(h.service.inspectActiveSave(activeArgs(h)),e=>e.code==='SAVE_INSPECTION_BUSY');h.config.onInspection=null;release();await first;
+ h.expire();const calls=h.calls.length,r=await h.service.inspectActiveSave(activeArgs(h));assert.equal(r.complete,false);assert.equal(r.rows[0].driveStatus,'unknown');assert.equal(h.calls.length,calls);assert.equal(journalBytes(h),before);
+ editJournal(h,j=>j.draft.sealed=false);await assert.rejects(h.service.inspectActiveSave(activeArgs(h)));assert.equal(h.writes.length,0);
+});
+test('active Save inspection bounds stalled requests and sanitizes Firebase failures without journal writes',async()=>{
+ const h=await activeHarness({inspectionPages:[{files:[]}]}),before=journalBytes(h);
+ h.config.onInspection=()=>new Promise(()=>{});const keep=setTimeout(()=>{},250);
+ try{const r=await h.service.inspectActiveSave(activeArgs(h));assert.equal(r.complete,false);assert.equal(r.rows[0].driveStatus,'unknown');}finally{clearTimeout(keep);}
+ h.config.inspectionReadError=true;
+ await assert.rejects(h.service.inspectActiveSave(activeArgs(h)),e=>e.code==='SAVE_INSPECTION_FAILED'&&!e.message.includes('SYNTHETIC_SECRET_ERROR'));
+ assert.equal(journalBytes(h),before);assert.equal(h.writes.length,0);
+});
+
+test('Chromium two-tab version upgrade preserves literal sealed journal and old File; explicit metadata-only diagnostics',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
+ const {createRequire}=await import('node:module'),req=createRequire(import.meta.url),pw=req(process.env.GP_PLAYWRIGHT_PATH),babel=req(process.env.GP_BABEL_PATH);
+ const baseline=process.env.GP_UPGRADE_BASELINE?await readFile(process.env.GP_UPGRADE_BASELINE,'utf8'):await fetch('https://raw.githubusercontent.com/fmdesigndigital-studio/garancije/56b5c7a9ede85a9f6132b75c2ff201dafa0a9e31/index.html').then(r=>{assert.equal(r.status,200);return r.text();});
+ assert.ok(baseline.includes("const RELEASE_VERSION = '2026.11.03.4'"));
+ const oldStart=baseline.indexOf('// ATTACHMENT COUNT METADATA'),oldScript=baseline.slice(oldStart,baseline.indexOf('</script>',oldStart));
+ const urls=[...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m=>m[1]).filter(x=>/react(?:-dom)?@/.test(x));
+ const libs=await Promise.all(urls.map(async u=>{const r=await fetch(u);assert.equal(r.status,200);return r.text();}));
+ const browser=await pw.chromium.launch({headless:true,...(process.env.GP_CHROMIUM_PATH?{executablePath:process.env.GP_CHROMIUM_PATH}:{})});
+ try{
+  const context=await browser.newContext({viewport:{width:390,height:844}});let unexpected=0;
+  await context.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<div id="root"></div>'}):(unexpected++,r.abort()));
+  const old=await context.newPage();await old.goto('http://localhost/');await old.addScriptTag({content:oldScript});
+  const email=/const EMAIL = '([^']+)'/.exec(script)[1],scope=/const SCOPE = '([^']+)'/.exec(script)[1];
+  const setup=(newPage)=>`window.syntheticCalls=[];window.syntheticReads=[];window.syntheticWrites=0;window.hold=false;window.connectedSession=false;
+   window.firebaseDeps={auth:{currentUser:{uid:'synthetic-owner',email:${JSON.stringify(email)}}}};
+   window.syntheticService=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'upgrade-active-save',storage:localStorage,getUser:()=>window.firebaseDeps.auth.currentUser,
+    authorize:async()=>{window.connectedSession=true;return {access_token:'synthetic-upgrade-only',expires_in:3600,scope:${JSON.stringify(scope)}}},
+    metadataStore:{read:async id=>{window.syntheticReads.push(id);return null;},commit:async()=>{window.syntheticWrites++;throw Error('NO_WRITES');}},
+    fetch:async(u,o={})=>{window.syntheticCalls.push({url:u,method:o.method||'GET'});if((o.method||'GET')!=='GET'||new URL(u).searchParams.has('alt'))throw Error('WRITE_OR_CONTENT_FORBIDDEN');
+      if(new URL(u).pathname==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:${JSON.stringify(email)}}}));
+      if(new URL(u).pathname!=='/drive/v3/files')throw Error('OTHER_RESOURCE_FORBIDDEN');
+      if(window.hold)await new Promise(r=>window.release=r);return new Response(JSON.stringify({files:[]}));}});
+   window.attachmentService=window.syntheticService;${newPage?'':'window.oldFile=new File(["SYNTHETIC_ORIGINAL"],"Original.jpg",{type:"image/jpeg"});window.oldFileIdentity=window.oldFile;'}
+   window.syntheticKey=Object.keys(localStorage).find(k=>k.includes('upgrade-active-save'));`;
+  await old.addScriptTag({content:setup(false)});
+  const raw=await old.evaluate(async()=>{
+   const s=window.syntheticService,u=window.firebaseDeps.auth.currentUser;await s.authChanged(u);await s.connect();
+   const d=await s.stageDraft({userId:u.uid,base:null,metadata:{name:'Synthetic upgrade warranty'},attachments:[],pending:[{id:'remaining-B',name:'Remaining B.jpg',mime:'image/jpeg',size:18,sha256:'b'.repeat(64)}],operationId:'upgrade-same-operation',expectedRevision:s.contentRevision(null),seal:true});
+   const key=Object.keys(localStorage).find(k=>k.includes('upgrade-active-save')),j=JSON.parse(localStorage.getItem(key));j.draft.saveState={version:1,phase:'external'};
+   j.v2Trials={history:{phase:'halted',negativeStatus:500}};j.textTrials={history:{phase:'trashed'}};j.abandonedDrafts={audit:{closed:true,operationId:'prior'}};
+   localStorage.setItem(key,JSON.stringify(j));window.syntheticKey=key;return localStorage.getItem(key);
+  });
+  const next=await context.newPage();await next.goto('http://localhost/');for(const content of libs)await next.addScriptTag({content});await next.addScriptTag({content:script});await next.addScriptTag({content:setup(true)});
+  assert.equal(await next.evaluate(()=>localStorage.getItem(window.syntheticKey)),raw);assert.equal(await next.evaluate(()=>window.connectedSession),false);
+  const component=html.slice(html.indexOf('        function attachmentDiagnosticContext('),html.indexOf('        function DraftForm('));
+  await next.addScriptTag({content:babel.transform("const {useState,useEffect,useRef}=React;"+component+"window.root=ReactDOM.createRoot(document.getElementById('root'));window.root.render(<AttachmentDiagnostics user={window.firebaseDeps.auth.currentUser} draftStatus='saving'/>);",{presets:[['react',{runtime:'classic'}]]}).code});
+  const section=next.getByRole('region',{name:'Dijagnostika priloga',exact:true});await section.getByRole('button',{name:'Otvori dijagnostiku priloga',exact:true}).click();
+  const check=next.getByRole('button',{name:'Proveri započeto čuvanje - bez upisa',exact:true});await check.waitFor();assert.equal(await next.evaluate(()=>window.syntheticCalls.length),0);assert.equal(await next.evaluate(()=>window.syntheticReads.length),0);
+  await check.click();await next.getByText('Provera nije potpuna. Ne ponavljajte Sačuvaj na osnovu ovog nalaza.',{exact:true}).waitFor();
+  assert.equal(await next.evaluate(()=>window.syntheticCalls.length),0);assert.equal(await next.evaluate(()=>window.connectedSession),false);assert.equal(await next.evaluate(()=>localStorage.getItem(window.syntheticKey)),raw);
+  // Synthetic explicit connect establishes a mock session only; production inspection never connects.
+  await next.evaluate(async()=>{await window.syntheticService.authChanged(window.firebaseDeps.auth.currentUser);await window.syntheticService.connect();window.syntheticCalls=[];window.hold=true;});
+  await check.click();await next.waitForFunction(()=>typeof window.release==='function');assert.equal(await check.isDisabled(),true);
+  await next.evaluate(()=>{window.hold=false;window.release();});await next.getByText('Nije pronađen fajl dostupan ovoj aplikaciji',{exact:true}).waitFor();
+  assert.equal(await next.evaluate(()=>window.syntheticCalls.length),1);assert.equal(await next.evaluate(()=>window.syntheticWrites),0);assert.equal(await next.evaluate(()=>localStorage.getItem(window.syntheticKey)),raw);
+  for(const width of [320,390,430]){await next.setViewportSize({width,height:844});const box=await check.boundingBox();assert.ok(box.height>=48&&box.x>=0&&box.x+box.width<=width);}
+  await next.evaluate(()=>{window.hold=true;window.release=null;});await check.click();await next.waitForFunction(()=>typeof window.release==='function');
+  await section.getByRole('button',{name:'Zatvori dijagnostiku priloga',exact:true}).click();await next.evaluate(()=>{window.hold=false;window.release();});
+  await section.getByRole('button',{name:'Otvori dijagnostiku priloga',exact:true}).click();assert.equal(await next.getByText('Nije pronađen fajl dostupan ovoj aplikaciji',{exact:true}).count(),0);
+  assert.equal(await old.evaluate(()=>localStorage.getItem(window.syntheticKey)),raw);assert.equal(await old.evaluate(()=>window.oldFile===window.oldFileIdentity),true);assert.equal(await old.evaluate(()=>window.oldFile.text()),'SYNTHETIC_ORIGINAL');
+  await next.reload();assert.equal(await next.evaluate(key=>localStorage.getItem(key),await old.evaluate(()=>window.syntheticKey)),raw);
+  // Load the actual entire application entry point as well, not only the diagnostic component.
+  const full=await context.newPage();
+  const entry=html.slice(html.indexOf('        window.garancijeBoot.start(() => {'),html.lastIndexOf('</script>'));
+  for(const state of ['none','reserved','uncertain','confirmed']){
+   const expected=await old.evaluate(({raw,state})=>{const j=JSON.parse(raw);if(state!=='none')j.jobs['c'.repeat(64)]={id:'synthetic_upgrade_reserved',state};const value=JSON.stringify(j);localStorage.setItem(window.syntheticKey,value);return value;},{raw,state});
+   await full.goto('http://localhost/');for(const content of libs)await full.addScriptTag({content});await full.addScriptTag({content:script});await full.addScriptTag({content:setup(true)});
+   await full.addScriptTag({content:`window.lucide={createIcons(){}};window.garancijeBoot={start(fn){fn();},ready(){},fail(m){window.bootFailure=m;}};
+    Object.assign(window.firebaseDeps,{db:{},appId:'synthetic-app',collection:()=>({}),onAuthStateChanged:(a,fn)=>{queueMicrotask(()=>fn(a.currentUser));return ()=>{};},onSnapshot:(q,fn)=>{queueMicrotask(()=>fn({docs:[]}));return ()=>{};}});`});
+   await full.addScriptTag({content:babel.transform(entry,{presets:[['react',{runtime:'classic'}]]}).code});
+   await full.locator('button.settings-button').click();await full.getByRole('button',{name:'Otvori dijagnostiku priloga',exact:true}).click();
+   await full.getByRole('button',{name:'Proveri započeto čuvanje - bez upisa',exact:true}).waitFor();
+   assert.equal(await full.evaluate(()=>localStorage.getItem(window.syntheticKey)),expected);assert.equal(await old.evaluate(()=>localStorage.getItem(window.syntheticKey)),expected);
+   assert.equal(await full.evaluate(()=>window.syntheticCalls.length),0);assert.equal(await full.evaluate(()=>window.syntheticReads.length),0);assert.equal(await full.evaluate(()=>window.syntheticWrites),0);
+   assert.equal(await full.locator('form.gp-form').count(),0);assert.equal(await full.evaluate(()=>window.bootFailure||null),null);
+  }
+  assert.equal(unexpected,0);
+  console.log('DOM upgrade .4 to candidate: two pages/same origin, sealed operation and literal journal/audits unchanged, old synthetic File identity/content retained; no autosave, image read or OAuth by diagnostic; disconnected result, single GET, stale unmount hidden; 320/390/430 touch targets. Android memory eviction remains unproven.');
+ }finally{await browser.close();}
 });
