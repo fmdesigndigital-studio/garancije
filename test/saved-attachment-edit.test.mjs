@@ -710,7 +710,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   assert.equal(await feedback.getAttribute('role'),'status');assert.equal(await feedback.getAttribute('aria-live'),'polite');assert.equal(await feedback.getAttribute('aria-atomic'),'true');assert.equal(await feedback.innerText(),'');
   await feedback.evaluate(e=>window.feedbackNode=e);
   const removeA=page.getByRole('button',{name:'Ukloni iz nacrta: A.jpg',exact:true});page.once('dialog',d=>d.dismiss());await removeA.click();assert.equal(await page.locator('.attachment').count(),2);assert.equal(await page.locator('.attachment-removal-success').count(),0);
-  page.once('dialog',d=>d.accept());await removeA.click();const success=feedback.getByText('Prilog je uklonjen iz nacrta.',{exact:true});await success.waitFor();
+  page.once('dialog',d=>d.accept());await removeA.click();const success=feedback.getByText('PRILOG JE UKLONJEN IZ NACRTA.',{exact:true});await success.waitFor();
   assert.equal(await page.locator('.attachment').count(),1);assert.equal(await page.getByRole('textbox',{name:'Probni naziv',exact:true}).inputValue(),'Synthetic pending notice');assert.equal(await feedback.evaluate(e=>e===window.feedbackNode),true);
   const computed=await success.evaluate(e=>{const s=getComputedStyle(e);return {color:s.color,background:s.backgroundColor,fontSize:s.fontSize,fontWeight:s.fontWeight,textAlign:s.textAlign,borderWidth:s.borderTopWidth,borderStyle:s.borderTopStyle};});
   assert.deepEqual(computed,{color:'rgb(23, 97, 68)',background:'rgb(240, 253, 244)',fontSize:'20px',fontWeight:'700',textAlign:'center',borderWidth:'1px',borderStyle:'solid'});

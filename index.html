@@ -2717,7 +2717,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.03.3';
+        const RELEASE_VERSION = '2026.11.03.4';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -3765,7 +3765,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     if(!current())return;
                     acknowledgeDraft(result.draft);
                     setPending(previous=>result.draft.pending.map(meta=>({...previous.find(a=>a.id===meta.id&&a.sha256===meta.sha256),...meta})));
-                    showRemovalNotice(result.localCopyRetained?'Prilog je uklonjen iz nacrta. Lokalna kopija čeka čišćenje.':'Prilog je uklonjen iz nacrta.',result.localCopyRetained?'neutral':'success');
+                    showRemovalNotice(result.localCopyRetained?'Prilog je uklonjen iz nacrta. Lokalna kopija čeka čišćenje.':'PRILOG JE UKLONJEN IZ NACRTA.',result.localCopyRetained?'neutral':'success');
                     requestAnimationFrame(()=>{if(current())document.getElementById('attachment-section')?.focus({preventScroll:true});});
                 }catch(e){if(current())handleDraftError(e);}
                 finally{removingRef.current=false;if(mounted.current)setRemoving(false);}
