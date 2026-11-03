@@ -12,7 +12,7 @@ const record=()=>({name:'Synthetic warranty',purchaseDate:'2025-01-01',baseMonth
 function storageFactory(){const data=new Map();return {data,fail:0,getItem:k=>data.get(k)??null,setItem(k,v){if(this.fail>0){this.fail--;throw Error('SYNTHETIC_STORAGE_FAILURE');}data.set(k,String(v));},removeItem:k=>data.delete(k)};}
 async function harness(config={}){
  const storage=config.storage??storageFactory(),records=config.records??new Map([['warranty-one',record()]]),calls=[],writes=[],DELETE={deleteField:true};
- const locks=new Map();const navigator={locks:{request(name,options,action){if(typeof options==='function'){action=options;options={};}
+ const locks=config.lockMap??new Map();const navigator={locks:{request(name,options,action){if(typeof options==='function'){action=options;options={};}
   if(options.ifAvailable&&locks.has(name))return Promise.resolve(action(null));const prior=locks.get(name)??Promise.resolve();
   const job=prior.catch(()=>{}).then(()=>action({name}));locks.set(name,job);job.finally(()=>{if(locks.get(name)===job)locks.delete(name);}).catch(()=>{});return job;}}};
  const window={localStorage:storage,sessionStorage:storageFactory(),fetch:async()=>{throw Error('REAL_NETWORK_FORBIDDEN');}};
@@ -29,6 +29,7 @@ async function harness(config={}){
    if(config.beforeCommit)await config.beforeCommit({pending,records});
    for(const [id,version]of readVersions)if(JSON.stringify(records.get(id))!==version)throw Error('SYNTHETIC_TRANSACTION_CONFLICT');
    if(config.failBegin&&kind){config.failBegin=false;throw Error('SYNTHETIC_FIRESTORE_DENIED');}
+   if(config.failFinish&&pending.some(x=>x.patch.lastAttachmentOperation)){config.failFinish=false;throw Error('SYNTHETIC_FINISH_FAILED');}
    if(config.failRenameCommit&&pending.some(x=>x.patch.lastOperation)){config.failRenameCommit=false;throw Error('SYNTHETIC_FINAL_SAVE_FAILED');}
    for(const item of pending){const next=item.mode==='set'&&!item.options?.merge?{}:{...records.get(item.id)};
     for(const [key,v]of Object.entries(item.patch)){if(v===DELETE)delete next[key];else next[key]=clone(v);}records.set(item.id,next);writes.push({id:item.id,mode:item.mode,keys:Object.keys(item.patch)});}
@@ -91,9 +92,12 @@ async function harness(config={}){
     if(config.noEtag&&!config.v2KeepJsonTag||config.renameMissingTag)delete data.etag;if(config.renameWeakTag)data.etag='W/"weak"';
     return new Response(JSON.stringify(data));
    }
-   assert.equal(init.method,'PATCH');const b=JSON.parse(init.body);assert.deepEqual(Object.keys(b),['title']);
+   assert.equal(init.method,'PATCH');const b=JSON.parse(init.body),removing=Object.hasOwn(b,'labels');
+   if(removing)assert.deepEqual(b,{labels:{trashed:true}});else assert.deepEqual(Object.keys(b),['title']);
    if(config.patchStatus)return new Response('{}',{status:config.patchStatus});if(config.concurrentDrive){config.concurrentDrive=false;f.name='External-change.jpg';f.v++;}
-   if(init.headers['If-Match']!=='"v'+f.v+'"')return new Response('{}',{status:412});if(config.renameLostBeforeApply)throw Error('RENAME_RESPONSE_UNKNOWN');f.name=b.title;f.v++;
+   if(removing)await config.beforeRemovalPatch?.(f);
+   if(init.headers['If-Match']!=='"v'+f.v+'"')return new Response('{}',{status:412});if(config.renameLostBeforeApply||removing&&config.removeLostBeforeApply)throw Error('PATCH_RESPONSE_UNKNOWN');
+   if(removing)f.trashed=true;else f.name=b.title;f.v++;
    if(config.hangPatch){config.hangPatch=false;return new Promise(()=>{});}if(config.losePatch){config.losePatch=false;throw Error('SYNTHETIC_DRIVE_RESPONSE_LOST');}
    return new Response(JSON.stringify({id:f.id,title:f.name}));
   }
@@ -194,7 +198,7 @@ test('immediate removal persists before Drive trash and preserves unsaved fields
  assert.equal(draft.pending[0].name,'Keep-this.jpg');assert.equal(draft.pending[0].retainedAutoName.name,'Keep-this.jpg');
  assert.deepEqual(JSON.parse(draft.expected),saved);assert.equal(result.removed,true);
  assert.equal(h.remote.get(ref(1).driveFileId).trashed,true);assert.equal(h.records.size,1);
- assert.ok(h.writes[0].keys.includes('attachments'));assert.deepEqual(JSON.parse(h.patches()[0].body),{trashed:true});
+ assert.ok(h.writes[0].keys.includes('attachments'));assert.deepEqual(JSON.parse(h.patches()[0].body),{labels:{trashed:true}});
 });
 test('Cancel/discard after completed immediate removal never restores reference or Drive file',async()=>{
  const h=await harness();await h.stage();await h.remove();const d=h.service.getDraft(h.user.uid);
@@ -428,7 +432,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   await page.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<div id="root"></div>'}):(requests++,r.abort()));
   await page.goto('http://localhost/');for(const content of libs)await page.addScriptTag({content});
   await page.addScriptTag({content:script});
-  const component=html.slice(html.indexOf('        function AttachmentList('),html.indexOf('        const draftConflictMessage'));
+  const component=html.slice(html.indexOf('        function RemovalInspection('),html.indexOf('        const draftConflictMessage'));
   const start=html.indexOf('            useEffect(()=>{',html.indexOf('exitContent.current=stagedContent;'));
   const effect=html.slice(start,html.indexOf('            const allowExit=',start));
   const hs=html.indexOf('            const changeSavedName='),handler=html.slice(hs,html.indexOf('\n            };',hs)+15);
@@ -437,7 +441,7 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
    "const {useState,useEffect,useRef}=React,attachmentNames=window.attachmentNames,attachmentKinds=['Ostalo'],appNavigation={pending:false},AttachmentViewer=()=>null;",
    "window.firebaseDeps={auth:{currentUser:{uid:'synthetic-owner',email:"+JSON.stringify(/const EMAIL = '([^']+)'/.exec(script)[1])+"}}};",
    "const service=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-dom',storage:localStorage,metadataStore:{read:async()=>null,list:async()=>[]},authorize:async()=>({access_token:'synthetic-DOM-token',expires_in:3600,scope:'https://www.googleapis.com/auth/drive.file'}),getUser:()=>window.firebaseDeps.auth.currentUser,fetch:async u=>{if(new URL(u).pathname==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:window.firebaseDeps.auth.currentUser.email}}));if(new URL(u).pathname==='/drive/v3/files')return new Response(JSON.stringify({files:[]}));throw Error('NETWORK_FORBIDDEN');}});",
-   "const actualStage=service.stageDraft.bind(service);window.stageTransitions=[];service.stageDraft=args=>new Promise(r=>setTimeout(r,35)).then(()=>actualStage(args)).then(d=>{window.stageTransitions.push(d);return d;});window.service=service;",
+   "const actualStage=service.stageDraft.bind(service);window.stageTransitions=[];service.stageDraft=args=>new Promise(r=>setTimeout(r,35)).then(()=>actualStage(args)).then(d=>{window.stageTransitions.push(d);return d;});window.service=service;window.attachmentService=service;",
    component,
    "function Fixture(){const user=window.firebaseDeps.auth.currentUser,initial={id:'dom-warranty',name:'Product',attachments:"+JSON.stringify([ref(1)])+"};",
    "const [form,setForm]=useState({name:'Product'}),[attachments,setAttachments]=useState(initial.attachments),[pending,setPending]=useState([{id:'pending',name:'Pending.jpg',mime:'image/jpeg',sha256:'c'.repeat(64),size:5,kind:'Ostalo'}]);",
@@ -603,6 +607,39 @@ test('Chromium DOM focus/caret and real draft autosave through rapid saved/pendi
   assert.equal(await page.evaluate(()=>window.recService.getDraft('synthetic-owner').metadata.name),'KEEP UNSAVED');
   assert.equal(await page.evaluate(()=>{const key=Object.keys(localStorage).find(k=>k.includes('isolated-halted-recovery')),j=JSON.parse(localStorage.getItem(key));return JSON.stringify({v2Trials:j.v2Trials,textExperiment:j.textExperiment})===window.recProtected;}),true);
   assert.equal(requests,0);console.log('DOM halted recovery: readonly first, explicit confirmation, one pinned V2 rename, target-only commit, preserved unsaved metadata and old500/TXT audits');
+
+
+  const remBase=record(),remFiles=Object.fromEntries(remBase.attachments.map(a=>[a.driveFileId,{id:a.driveFileId,name:a.name,mimeType:a.mime,size:String(a.size),sha256Checksum:a.sha256,parents:syntheticRemote.parents,ownedByMe:true,shared:false,permissions:syntheticRemote.permissions,capabilities:{canTrash:true,canRename:true},appProperties:{app:'garancije-pro',operation:'b'.repeat(64),sha256:a.sha256},trashed:false,v:1}]));
+  const handlerStart=html.indexOf('            const syncSavedRemoval='),remHandlers=html.slice(handlerStart,html.indexOf('            const changeSavedName=',handlerStart));
+  const remSetup=[
+   html.split('\n').find(l=>l.includes('const textValue =')),html.split('\n').find(l=>l.includes('const attachmentRefs =')),
+   'window.remBase='+JSON.stringify({...remBase,id:'warranty-one'})+';window.remRecord='+JSON.stringify(remBase)+';window.remFiles='+JSON.stringify(remFiles)+';window.remPatches=[];window.remWrites=0;window.remGets=0;',
+   "window.remStore={read:async()=>structuredClone(window.remRecord),list:async()=>[{...structuredClone(window.remRecord),id:'warranty-one'}],beginAttachmentEdit:async a=>{if(a.id!=='warranty-one'||window.garancijeFingerprint(window.remRecord)!==a.expected||a.operation.kind!=='remove')throw Error('CONFLICT');const base=structuredClone(window.remRecord),next={...base,attachments:base.attachments.filter(x=>x.id!==a.operation.targets[0].attachmentId)};next.attachmentCount=next.attachments.length;next.attachmentNames=next.attachments.map(x=>x.name);const op={...a.operation,postHash:await window.garancijeSavedAttachments.hash(next)};window.remRecord={...next,_attachmentEdit:op};window.remWrites++;return structuredClone(window.remRecord);},finishAttachmentRemoval:async a=>{const r=window.remRecord;if(r._attachmentEdit?.operationId!==a.operationId)throw Error('CONFLICT');const base=window.garancijeSavedAttachments.withoutEdit(r);if(await window.garancijeSavedAttachments.hash(base)!==r._attachmentEdit.postHash)throw Error('POST_CONFLICT');window.remRecord={...base,lastAttachmentOperation:{operationId:a.operationId,kind:'remove',attachmentId:r._attachmentEdit.targets[0].attachmentId}};window.remWrites++;return structuredClone(window.remRecord);}};",
+   "window.remService=window.createGarancijeDrive({simulated:true,allowWrites:true,namespace:'isolated-removal-dom',storage:localStorage,getUser:()=>window.firebaseDeps.auth.currentUser,metadataStore:window.remStore,authorize:async()=>({access_token:'synthetic-rem-only',expires_in:3600,scope:"+JSON.stringify(/const SCOPE = '([^']+)'/.exec(script)[1])+"}),fetch:async(u,init={})=>{const p=new URL(u).pathname;if(p==='/drive/v3/about')return new Response(JSON.stringify({user:{emailAddress:window.firebaseDeps.auth.currentUser.email}}));const id=decodeURIComponent(p.split('/').at(-1)),f=window.remFiles[id];if(p!=='/drive/v2/files/'+id||!f)throw Error('UNAPPROVED_REMOVAL_TARGET');if((init.method||'GET')==='GET'){window.remGets++;if(window.remHold)await new Promise(r=>window.remRelease=r);if(window.remGetStatus)return new Response('{}',{status:window.remGetStatus});return new Response(JSON.stringify({...f,title:f.name,fileSize:f.size,etag:'\"v'+f.v+'\"',labels:{trashed:f.trashed},parents:f.parents.map(id=>({id})),properties:Object.entries(f.appProperties).map(([key,value])=>({key,value,visibility:'PRIVATE'}))}));}if(init.method!=='PATCH'||id!=='synthetic_drive_file_2')throw Error('FIRST_FILE_MUTATION_FORBIDDEN');const b=JSON.parse(init.body);if(JSON.stringify(b)!==JSON.stringify({labels:{trashed:true}}))throw Error('UNAPPROVED_FIELDS');if(init.headers['If-Match']!=='\"v'+f.v+'\"')return new Response('{}',{status:412});window.remPatches.push(b);f.trashed=true;f.v++;return new Response(JSON.stringify({id:f.id,title:f.name}));}});window.attachmentService=window.remService;",
+   "function RemovalFixture(){const service=window.remService,user=window.firebaseDeps.auth.currentUser,initial=window.remBase,d=service.getDraft(user.uid);const [attachments,setAttachments]=useState(d.attachments),[pending,setPending]=useState(d.pending),[removing,setRemoving]=useState(false),[removalNotice,setRemovalNotice]=useState(''),[imageError,setImageError]=useState(''),[savedEditPending,setSavedEditPending]=useState(false),[probeKey,setProbeKey]=useState('initial');const form=d.metadata;window.setRemovalProbeKey=setProbeKey;const mounted=useRef(true),disposed=useRef(false),discardingRef=useRef(false),savingRef=useRef(false),processingRef=useRef(false),removingRef=useRef(false),stagingRef=useRef(false),stageTask=useRef(null),stageSequence=useRef(0),metadataBase=useRef(JSON.parse(d.expected)),draftRevisionRef=useRef(d.revision),draftPending=useRef(service.pendingFingerprint(d.pending)),stageAcknowledged=useRef(null),savedEditPendingRef=useRef(false);const acknowledgeDraft=n=>{draftRevisionRef.current=n.revision;draftPending.current=service.pendingFingerprint(n.pending);};",
+   remHandlers,
+   "return <><AttachmentList attachments={attachments} user={user} onRemoveSaved={runSavedRemoval} removeDisabled={removing||savedEditPending} removalInspectionContext={{operationId:d.operationId,contentKey:probeKey}}/><p role='status'>{removalNotice}</p>{imageError&&<p role='alert'>{imageError}</p>}</>;}",
+   "window.mountRemoval=async()=>{const user=window.firebaseDeps.auth.currentUser;await window.remService.authChanged(user);await window.remService.connect();await window.remService.stageDraft({userId:user.uid,id:'warranty-one',base:window.remRecord,metadata:{name:'KEEP REMOVAL UNSAVED'},attachments:window.remRecord.attachments,pending:[],operationId:'removal-dom-op',expectedRevision:window.remService.contentRevision(null)});window.domRoot.render(<RemovalFixture/>);};"
+  ].join('\n');
+  await page.addScriptTag({content:babel.transform(remSetup,{presets:[['react',{runtime:'classic'}]]}).code});await page.evaluate(()=>window.mountRemoval());
+  const targetCard=page.locator('.attachment').filter({has:page.getByText('Image-2.jpg',{exact:true})}),remProbe=targetCard.getByRole('button',{name:'Proveri uklanjanje - bez čuvanja',exact:true});
+  await remProbe.waitFor();const remJournalBefore=await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k);});
+  await remProbe.evaluate(e=>{e.click();e.click();});await targetCard.getByText('Jak V2 validator dostupan',{exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>window.remGets),1);assert.equal(await page.evaluate(()=>window.remWrites),0);assert.equal(await page.evaluate(()=>window.remPatches.length),0);
+  assert.equal(await page.evaluate(()=>{const k=Object.keys(localStorage).find(k=>k.includes('isolated-removal-dom'));return localStorage.getItem(k);}),remJournalBefore);
+  await page.evaluate(()=>{window.remHold=true;window.remRelease=null;});await remProbe.click();await page.waitForFunction(()=>typeof window.remRelease==='function');
+  await page.evaluate(()=>window.setRemovalProbeKey('changed-during-request'));await page.waitForTimeout(20);await page.evaluate(()=>{window.remHold=false;window.remRelease();});
+  await page.waitForFunction(()=>!document.querySelector('[aria-label="Provera uklanjanja priloga"] button').disabled);
+  assert.equal(await targetCard.getByText('Jak V2 validator dostupan',{exact:true}).count(),0);
+  await page.evaluate(()=>window.remGetStatus=403);await remProbe.click();await targetCard.getByRole('alert').waitFor();assert.ok((await targetCard.getByRole('alert').innerText()).includes('403/404'));
+  await page.evaluate(()=>window.remGetStatus=null);await remProbe.click();await targetCard.getByText('Jak V2 validator dostupan',{exact:true}).waitFor();
+  page.once('dialog',d=>d.dismiss());await targetCard.getByRole('button',{name:'Ukloni prilog',exact:true}).click();assert.equal(await page.evaluate(()=>window.remWrites),0);assert.equal(await page.evaluate(()=>window.remPatches.length),0);
+  page.once('dialog',d=>{assert.ok(d.message().includes('Image-2.jpg'));assert.ok(d.message().includes('Odustani'));d.accept();});
+  await targetCard.getByRole('button',{name:'Ukloni prilog',exact:true}).click();await page.getByText('Prilog je uklonjen iz garancije i potvrdjen u Drive korpi. Odustani ga ne vraca.',{exact:true}).waitFor({timeout:5000});
+  assert.equal(await page.locator('.attachment').count(),1);assert.equal(await page.evaluate(()=>window.remRecord.attachmentCount),1);assert.deepEqual(await page.evaluate(()=>window.remRecord.attachmentNames),['Image-1.jpg']);
+  assert.equal(await page.evaluate(()=>window.remFiles.synthetic_drive_file_1.trashed),false);assert.equal(await page.evaluate(()=>window.remFiles.synthetic_drive_file_2.trashed),true);assert.equal(await page.evaluate(()=>window.remService.getDraft('synthetic-owner').metadata.name),'KEEP REMOVAL UNSAVED');
+  assert.deepEqual(await page.evaluate(()=>window.remPatches),[{labels:{trashed:true}}]);assert.equal(requests,0);
+  console.log('DOM removal: exact second card, readonly zero writes, duplicate/stale/403 handling, cancel confirmation zero writes, confirmed single V2 trash, first ref and unsaved fields retained');
 
  }finally{await browser.close();}
 });
@@ -1028,4 +1065,102 @@ test('halted recovery validates immutable audit link before further work',async(
 for(const mode of ['renameDuplicateProperty','renamePublicOnly','renameNoProperties'])test('generic V2 rename mapping rejects '+mode+' before reservation or PATCH',async()=>{
  const h=await harness({[mode]:true}),d=await h.stage({attachments:[ref(1,'New-name.jpg'),ref(2)],seal:true});
  await assert.rejects(h.service.saveWarranty(saveArgs(h,d)));assert.equal(h.patches().length,0);assert.equal(h.writes.length,0);
+});
+
+
+const removalInspect=(h,extra={})=>{const d=h.service.getDraft(h.user.uid);return h.service.inspectSavedRemoval({userId:h.user.uid,operationId:d.operationId,attachmentId:'attachment-1',expectedRevision:d.revision,isCurrent:()=>true,...extra});};
+const journalSnapshot=h=>[...h.storage.data.entries()].filter(([k])=>k.startsWith('garancije-drive-integration-v1:'));
+test('removal readonly exact selected ID returns only fixed flags and never touches draft/journal/Firebase/Drive',async()=>{
+ const h=await harness();await h.stage({name:'UNSAVED'});const before=clone(journalSnapshot(h)),server=clone(h.records.get('warranty-one'));
+ const r=await removalInspect(h);
+ assert.deepEqual(JSON.parse(JSON.stringify(r)),{identityVerified:true,referencePresent:true,reservation:'none',trashed:false,nameMatchesOld:true,canTrash:true,etagReadable:true,attemptPhase:'not_sent'});
+ assert.deepEqual(journalSnapshot(h),before);assert.deepEqual(h.records.get('warranty-one'),server);assert.equal(h.writes.length,0);assert.equal(h.patches().length,0);
+ assert.ok(h.calls.every(c=>c.method==='GET'&&c.url.includes('/drive/v2/files/'+ref(1).driveFileId)));assert.ok(!h.calls.some(c=>c.url.includes(ref(2).driveFileId)));
+ assert.ok(!JSON.stringify(r).includes(ref(1).driveFileId));assert.ok(!JSON.stringify(r).includes('synthetic-token'));assert.ok(!JSON.stringify(r).includes('a'.repeat(64)));
+});
+for(const flag of ['trashed','different-name','canTrash-false','canTrash-missing','weak-tag','missing-tag'])test('readonly removal reports distinct '+flag+' without changing any data',async()=>{
+ const config={renameWeakTag:flag==='weak-tag',renameMissingTag:flag==='missing-tag'},h=await harness(config);await h.stage();const f=h.remote.get(ref(1).driveFileId);
+ if(flag==='trashed')f.trashed=true;if(flag==='different-name')f.name='Changed.jpg';if(flag==='canTrash-false')f.capabilities.canTrash=false;if(flag==='canTrash-missing')delete f.capabilities.canTrash;
+ const before=clone(journalSnapshot(h)),r=await removalInspect(h);
+ assert.equal(r.trashed,flag==='trashed');assert.equal(r.nameMatchesOld,flag!=='different-name');assert.equal(r.canTrash,flag==='canTrash-missing'?null:flag!=='canTrash-false');
+ assert.equal(r.etagReadable,!['weak-tag','missing-tag'].includes(flag));assert.deepEqual(journalSnapshot(h),before);assert.equal(h.writes.length,0);assert.equal(h.patches().length,0);
+});
+for(const getStatus of [403,404])test('readonly removal '+getStatus+' preserves all evidence and zero writes',async()=>{
+ const h=await harness({getStatus});await h.stage();const before=clone(journalSnapshot(h));await assert.rejects(removalInspect(h),/403\/404/);
+ assert.deepEqual(journalSnapshot(h),before);assert.equal(h.writes.length,0);assert.equal(h.patches().length,0);
+});
+for(const bad of ['foreign','shared','duplicate','checksum','properties','wrong-id','missing-trashed'])test('removal readonly rejects ambiguous identity '+bad,async()=>{
+ const h=await harness({renameNoProperties:bad==='properties'});const f=h.remote.get(ref(1).driveFileId);
+ if(bad==='foreign')f.ownedByMe=false;if(bad==='shared')h.records.set('other',{...record(),attachments:[ref(1)]});
+ if(bad==='duplicate')h.records.get('warranty-one').attachments.push({...ref(1),id:'duplicate'});
+ if(bad==='checksum')f.sha256Checksum='e'.repeat(64);if(bad==='wrong-id')f.id='unapproved-id';if(bad==='missing-trashed')delete f.trashed;
+ await h.stage();const before=clone(journalSnapshot(h));await assert.rejects(removalInspect(h));assert.deepEqual(journalSnapshot(h),before);assert.equal(h.patches().length,0);assert.equal(h.writes.length,0);
+});
+for(const stale of ['owner','revision','server','closed'])test('readonly removal rejects stale '+stale+' without returning previous result',async()=>{
+ let h;const config={onMetadata:()=>{if(stale==='owner')h.window.firebaseDeps.auth.currentUser={uid:'other',email:'other.invalid'};if(stale==='revision')editJournal(h,j=>j.draft.revision++);if(stale==='server')h.records.get('warranty-one').description='newer';}};
+ h=await harness(config);await h.stage();await assert.rejects(removalInspect(h,{isCurrent:()=>stale!=='closed'}));assert.equal(h.patches().length,0);assert.equal(h.writes.length,0);
+});
+test('repeated readonly removal clicks share busy guard and leave journal byte identical',async()=>{
+ let release;const gate=new Promise(r=>release=r),h=await harness({onMetadata:()=>gate});await h.stage();const before=clone(journalSnapshot(h)),one=removalInspect(h),two=removalInspect(h);release();
+ const r=await Promise.allSettled([one,two]);assert.equal(r.filter(x=>x.status==='fulfilled').length,1);assert.deepEqual(journalSnapshot(h),before);assert.equal(h.writes.length,0);
+});
+test('V2 removal works with absent V3 header and uses exact JSON validator/labels only',async()=>{
+ const h=await harness({noEtag:true,v2KeepJsonTag:true});await h.stage();await h.remove();
+ assert.equal(h.patches().length,1);const p=h.patches()[0];assert.ok(p.url.includes('/drive/v2/files/'+ref(1).driveFileId));assert.equal(p.headers['If-Match'],'"v1"');assert.deepEqual(JSON.parse(p.body),{labels:{trashed:true}});
+ assert.equal(h.remote.get(ref(2).driveFileId).name,'Image-2.jpg');assert.equal(h.remote.get(ref(2).driveFileId).trashed,false);
+});
+for(const patchStatus of [412,500,403,404])test('removal '+patchStatus+' is persisted and cannot resend PATCH after reload or reconcile',async()=>{
+ const h=await harness({patchStatus});await h.stage();await assert.rejects(h.remove());assert.equal(h.patches().length,1);assert.equal(h.remote.get(ref(1).driveFileId).trashed,false);
+ const phase=patchStatus===412?'conflict':'failed',entry=journalSnapshot(h)[0],j=JSON.parse(entry[1]);assert.equal(Object.values(j.removalWrites)[0].phase,phase);
+ const next=await harness({storage:h.storage,records:h.records,remote:h.remote});const flags=await removalInspect(next);assert.equal(flags.referencePresent,false);assert.equal(flags.reservation,'matching');assert.equal(flags.attemptPhase,phase);
+ for(let i=0;i<2;i++)await assert.rejects(next.service.resumeSavedAttachmentEdit({userId:next.user.uid,id:'warranty-one'}));
+ assert.equal(next.patches().length,0);assert.equal(next.records.get('warranty-one').attachmentCount,1);assert.ok(next.records.get('warranty-one')._attachmentEdit);
+});
+test('actual stale ETag with unchanged name returns 412 and no retry or rollback',async()=>{
+ const h=await harness({beforeRemovalPatch:f=>{f.v++;}});await h.stage();const original=h.remote.get(ref(1).driveFileId);
+ await assert.rejects(h.remove());assert.equal(original.v,2);assert.equal(original.trashed,false);assert.equal(original.name,'Image-1.jpg');assert.equal(h.patches()[0].headers['If-Match'],'"v1"');
+ await assert.rejects(h.service.resumeSavedAttachmentEdit({userId:h.user.uid,id:'warranty-one'}));assert.equal(h.patches().length,1);
+});
+test('lost removal response before application cannot resend or claim success after reload',async()=>{
+ const h=await harness({removeLostBeforeApply:true});await h.stage();await assert.rejects(h.remove());assert.equal(h.remote.get(ref(1).driveFileId).trashed,false);
+ const next=await harness({storage:h.storage,records:h.records,remote:h.remote});assert.equal((await removalInspect(next)).attemptPhase,'sending');
+ await assert.rejects(next.service.resumeSavedAttachmentEdit({userId:next.user.uid,id:'warranty-one'}));assert.equal(next.patches().length,0);assert.ok(next.records.get('warranty-one')._attachmentEdit);
+});
+test('local write-ahead failure sends no PATCH; explicit continuation can send its first attempt',async()=>{
+ const h=await harness();await h.stage();await assert.rejects(h.remove({onUnlinked:()=>{h.storage.fail=1;}}));assert.equal(h.patches().length,0);assert.equal(h.remote.get(ref(1).driveFileId).trashed,false);
+ await h.service.resumeSavedAttachmentEdit({userId:h.user.uid,id:'warranty-one'});assert.equal(h.patches().length,1);assert.equal(h.remote.get(ref(1).driveFileId).trashed,true);
+});
+test('Firestore finalization failure after verified trash retains pending state then finishes without extra PATCH',async()=>{
+ const h=await harness({failFinish:true});await h.stage({name:'Unsaved retained'});await assert.rejects(h.remove());assert.equal(h.remote.get(ref(1).driveFileId).trashed,true);assert.ok(h.records.get('warranty-one')._attachmentEdit);
+ const next=await harness({storage:h.storage,records:h.records,remote:h.remote});const r=await removalInspect(next);assert.equal(r.trashed,true);assert.equal(r.referencePresent,false);
+ await next.service.resumeSavedAttachmentEdit({userId:next.user.uid,id:'warranty-one'});assert.equal(next.patches().length,0);assert.equal(next.records.get('warranty-one')._attachmentEdit,undefined);assert.equal(next.service.getDraft(next.user.uid).metadata.name,'Unsaved retained');
+});
+test('removal metadata failure after applied PATCH recovers with same ID and no second write',async()=>{
+ const h=await harness();await h.stage();let checks=0;h.config.onMetadata=()=>{if(++checks===3)throw Error('NETWORK_OFFLINE');};
+ await assert.rejects(h.remove());assert.equal(h.remote.get(ref(1).driveFileId).trashed,true);assert.equal(h.patches().length,1);
+ h.config.onMetadata=undefined;await h.service.resumeSavedAttachmentEdit({userId:h.user.uid,id:'warranty-one'});assert.equal(h.patches().length,1);
+});
+test('two tab removal shares lock and can never apply trash twice',async()=>{
+ const lockMap=new Map(),h=await harness({lockMap});await h.stage({name:'Keep local'});const next=await harness({lockMap,storage:h.storage,records:h.records,remote:h.remote});
+ const r=await Promise.allSettled([h.remove(),next.remove()]);assert.equal(r.filter(x=>x.status==='fulfilled').length,1);assert.equal(h.patches().length+next.patches().length,1);assert.equal(h.records.get('warranty-one').attachments.length,1);
+});
+
+for(const flag of ['trashed','different-name','canTrash-false','canTrash-missing','weak-tag','missing-tag'])test('removal preflight '+flag+' cannot write intent, Firebase or Drive',async()=>{
+ const h=await harness({renameWeakTag:flag==='weak-tag',renameMissingTag:flag==='missing-tag'});await h.stage();const f=h.remote.get(ref(1).driveFileId);
+ if(flag==='trashed')f.trashed=true;if(flag==='different-name')f.name='Changed.jpg';if(flag==='canTrash-false')f.capabilities.canTrash=false;if(flag==='canTrash-missing')delete f.capabilities.canTrash;
+ const before=clone(journalSnapshot(h));await assert.rejects(h.remove());assert.deepEqual(journalSnapshot(h),before);assert.equal(h.patches().length,0);assert.equal(h.writes.length,0);assert.equal(h.records.get('warranty-one').attachments.length,2);
+});
+test('readonly removal offline and expired token never mutate draft or warranty',async()=>{
+ const h=await harness({onMetadata:()=>{throw Error('OFFLINE');}});await h.stage();const before=clone(journalSnapshot(h));await assert.rejects(removalInspect(h));assert.deepEqual(journalSnapshot(h),before);assert.equal(h.writes.length,0);
+ const next=await harness();await next.stage();next.expire();const requests=next.calls.length;await assert.rejects(removalInspect(next));assert.equal(next.calls.length,requests);assert.equal(next.writes.length,0);assert.equal(next.patches().length,0);
+});
+test('Firebase rejects initial unlink: no Drive PATCH and existing references/names preserved',async()=>{
+ const h=await harness({failBegin:true});await h.stage();const before=clone(h.records.get('warranty-one'));await assert.rejects(h.remove());assert.deepEqual(h.records.get('warranty-one'),before);assert.equal(h.patches().length,0);assert.equal(h.remote.get(ref(1).driveFileId).trashed,false);
+});
+test('removal preserves completed rename, old halted audit and finished TXT journal exactly',async()=>{
+ const h=await harness();await h.stage();const protectedState={v2Trials:{old:{phase:'halted',negativeStatus:500}},textExperiment:{phase:'trashed',events:[{status:412}]},renameRecoveries:{old:{phase:'complete'}}};
+ editJournal(h,j=>Object.assign(j,clone(protectedState)));await h.remove();const j=JSON.parse(journalSnapshot(h)[0][1]);for(const k of Object.keys(protectedState))assert.deepEqual(j[k],protectedState[k]);assert.equal(h.remote.get(ref(2).driveFileId).trashed,false);
+});
+test('readonly removal checks the exact journal draft/operation identity',async()=>{
+ const h=await harness({patchStatus:412});await h.stage();await assert.rejects(h.remove());editJournal(h,j=>{const v=Object.values(j.attachmentEdits)[0];v.draftOperationId='unrelated-draft';});const before=clone(journalSnapshot(h));await assert.rejects(removalInspect(h));assert.deepEqual(journalSnapshot(h),before);assert.equal(h.patches().length,1);
 });
