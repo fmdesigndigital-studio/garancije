@@ -1610,7 +1610,7 @@ test('Chromium header help preserves live draft/view; mobile brand/presence row 
  try{
   const context=await browser.newContext({viewport:{width:390,height:844}}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));let requests=0;
   await page.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body class="gp-ui"><div id="root"></div></body></html>'}):(requests++,r.abort()));
-  await page.goto('http://localhost/');await page.addStyleTag({content:html.match(/<style>([\s\S]*?)<\/style>/)[1]});for(const content of libs)await page.addScriptTag({content});await page.addScriptTag({content:script});
+  await page.clock.install();await page.goto('http://localhost/');await page.addStyleTag({content:html.match(/<style>([\s\S]*?)<\/style>/)[1]});for(const content of libs)await page.addScriptTag({content});await page.addScriptTag({content:script});
   const email=/const EMAIL = '([^']+)'/.exec(script)[1];
   const setup=`const {useState,useEffect,useRef}=React;const RELEASE_VERSION=${JSON.stringify(/const RELEASE_VERSION = '([^']+)'/.exec(html)[1])};
    ${iconCode}\n${navigation}\n${components}\n${presenceCode}
@@ -1647,6 +1647,11 @@ test('Chromium header help preserves live draft/view; mobile brand/presence row 
   assert.deepEqual(await page.evaluate(()=>({routes:window.helpRouteRestores,guards:window.helpGuardCalls,writes:window.helpRemoteWrites})),{routes:0,guards:0,writes:0});
   if(process.env.GP_HELP_ARTIFACT_DIR){const {mkdir}=await import('node:fs/promises');await mkdir(process.env.GP_HELP_ARTIFACT_DIR,{recursive:true});}
   const headerLayouts=[];
+  const readHeaderPlacement=()=>page.locator('header.app-header').evaluate(el=>{
+   const brand=el.querySelector('.brand'),tab=el.querySelector('.tab-presence-trigger'),help=el.querySelector('.help-trigger'),settings=el.querySelector('.settings-button');
+   const nodes=[brand,tab,help,settings].filter(n=>n&&n.getClientRects().length),rect=n=>{const {x,y,width,height,top,bottom,left,right}=n.getBoundingClientRect();return {x,y,width,height,top,bottom,left,right};},b=rect(brand),a=rect(help),t=tab&&tab.getClientRects().length?rect(tab):null;
+   return {brand:b,tab:t,help:a,settings:rect(settings),visibleText:nodes.every(n=>{const r=rect(n),s=getComputedStyle(n);return r.left>=0&&r.right<=innerWidth&&n.scrollWidth<=n.clientWidth+1&&s.textOverflow!=='ellipsis'&&s.visibility==='visible';}),noOverlap:nodes.every((n,i)=>nodes.slice(i+1).every(m=>{const r=rect(n),q=rect(m);return r.right<=q.left+.5||q.right<=r.left+.5||r.bottom<=q.top+.5||q.bottom<=r.top+.5;})),sameTopRow:t?Math.abs((b.top+b.bottom)/2-(t.top+t.bottom)/2)<1:true,actionsSameRow:Math.abs((b.top+b.bottom)/2-(a.top+a.bottom)/2)<1,actionsBelow:a.top>=Math.max(b.bottom,t?.bottom||0)};
+  });
   for(const presence of [false,true]){
    let peer;
    if(presence){
@@ -1661,13 +1666,13 @@ test('Chromium header help preserves live draft/view; mobile brand/presence row 
     const header=await page.locator('header.app-header').evaluate(el=>{const pair=el.querySelector('.header-actions'),help=pair.querySelector('.help-trigger'),settings=pair.querySelector('.settings-button'),a=help.getBoundingClientRect(),b=settings.getBoundingClientRect();return {noOverflow:document.documentElement.scrollWidth<=innerWidth,paired:help.nextElementSibling===settings&&Math.abs(a.top-b.top)<1&&Math.abs(a.bottom-b.bottom)<1,inside:a.left>=0&&b.right<=innerWidth,minTarget:Math.min(a.width,a.height,b.width,b.height)>=44,weight:getComputedStyle(help).fontWeight};});
     assert.equal(header.noOverflow,true,JSON.stringify({width,scale,presence,header}));assert.equal(header.inside,true);assert.equal(header.minTarget,true);assert.equal(header.weight,'650');
     if(width>=320||scale===1)assert.equal(header.paired,true,JSON.stringify({width,scale,presence,header}));
-    const placement=await page.locator('header.app-header').evaluate(el=>{
-     const brand=el.querySelector('.brand'),tab=el.querySelector('.tab-presence-trigger'),help=el.querySelector('.help-trigger'),settings=el.querySelector('.settings-button');
-     const nodes=[brand,tab,help,settings].filter(n=>n&&n.getClientRects().length),rect=n=>{const {x,y,width,height,top,bottom,left,right}=n.getBoundingClientRect();return {x,y,width,height,top,bottom,left,right};},b=rect(brand),a=rect(help),t=tab&&tab.getClientRects().length?rect(tab):null;
-     return {brand:b,tab:t,help:a,settings:rect(settings),visibleText:nodes.every(n=>{const r=rect(n),s=getComputedStyle(n);return r.left>=0&&r.right<=innerWidth&&n.scrollWidth<=n.clientWidth+1&&s.textOverflow!=='ellipsis'&&s.visibility==='visible';}),noOverlap:nodes.every((n,i)=>nodes.slice(i+1).every(m=>{const r=rect(n),q=rect(m);return r.right<=q.left+.5||q.right<=r.left+.5||r.bottom<=q.top+.5||q.bottom<=r.top+.5;})),sameTopRow:t?Math.abs((b.top+b.bottom)/2-(t.top+t.bottom)/2)<1:true,actionsBelow:a.top>=Math.max(b.bottom,t?.bottom||0)};
-    });
+    const placement=await readHeaderPlacement();
     assert.equal(placement.visibleText,true,JSON.stringify({width,scale,presence,placement}));assert.equal(placement.noOverlap,true,JSON.stringify({width,scale,presence,placement}));
-    if(width<=600)assert.equal(placement.actionsBelow,true,JSON.stringify({width,scale,presence,placement}));
+    if(width<=600){
+     const fitsWithoutTab=scale===1?width>=360:width>=600;
+     assert.equal(placement.actionsSameRow,!presence&&fitsWithoutTab,JSON.stringify({width,scale,presence,placement}));
+     assert.equal(placement.actionsBelow,presence||!fitsWithoutTab,JSON.stringify({width,scale,presence,placement}));
+    }
     if(width>=320&&width<=600&&scale===1)assert.equal(placement.sameTopRow,true,JSON.stringify({width,scale,presence,placement}));
     headerLayouts.push({width,scale,presence,...placement});
     if(process.env.GP_HELP_ARTIFACT_DIR&&[240,320,360,390,430,600,601,1280].includes(width))await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/header-'+width+'-'+(presence?'with-tab':'no-tab')+(scale===2?'-200':'')+'.png'});
@@ -1681,7 +1686,23 @@ test('Chromium header help preserves live draft/view; mobile brand/presence row 
    }
    if(peer){await peer.evaluate(()=>window.syntheticPeer.close());await peer.close();}
   }
-  if(process.env.GP_HELP_ARTIFACT_DIR){const {writeFile}=await import('node:fs/promises');await writeFile(process.env.GP_HELP_ARTIFACT_DIR+'/header-layouts.json',JSON.stringify(headerLayouts,null,2));}
-  assert.equal(requests,0);assert.deepEqual(errors,[]);console.log('HEADER HELP: X/Escape/history Back in five views; unchanged live journal/draft/input/Blob; header focus/top; paired Uputstvo/settings and actual TabPresence with a synthetic BroadcastChannel peer; 40 layouts at 240/280/320/360/390/430/600/601/768/1280 and 100/200% text; mobile brand/presence top row at 320-600 and 100%, actions below, no overlap or clipped labels; 800-weight subtitles; no remote writes or browser network. Physical Android Back remains untested.');
+  await page.setViewportSize({width:390,height:844});await page.addStyleTag({content:'html{font-size:16px}body.gp-ui{font-size:16px}'});
+  const dynamicBefore=await page.evaluate(()=>{window.dynamicHeader=document.querySelector('header.app-header');window.dynamicHelp=document.querySelector('.help-trigger');return window.captureHelpState();});
+  let dynamicNavigations=0;const onDynamicNavigation=frame=>{if(frame===page.mainFrame())dynamicNavigations++;};page.on('framenavigated',onDynamicNavigation);
+  await trigger.focus();await page.clock.fastForward(31000);await page.getByRole('button',{name:'Druga kartica',exact:true}).waitFor({state:'hidden'});
+  const afterExpiry=await readHeaderPlacement();assert.equal(afterExpiry.actionsSameRow,true);assert.equal(afterExpiry.actionsBelow,false);
+  if(process.env.GP_HELP_ARTIFACT_DIR)await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/dynamic-390-after-expiry-no-tab.png'});
+  const peer=await context.newPage();await peer.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<!doctype html><title>Synthetic dynamic tab peer</title>'}):r.abort());await peer.goto('http://localhost/');
+  await peer.evaluate(()=>{window.syntheticPeer=new BroadcastChannel('garancijepro-tab-presence-v1');window.syntheticPeer.onmessage=({data})=>{if(data?.v===1&&data.type==='challenge')window.syntheticPeer.postMessage({v:1,type:'ack',sender:crypto.randomUUID(),to:data.sender,nonce:data.nonce});};});
+  await page.bringToFront();await page.clock.fastForward(10000);await page.getByRole('button',{name:'Druga kartica',exact:true}).waitFor({state:'visible'});
+  const afterDetection=await readHeaderPlacement();assert.equal(afterDetection.sameTopRow,true);assert.equal(afterDetection.actionsBelow,true);assert.equal(afterDetection.actionsSameRow,false);
+  if(process.env.GP_HELP_ARTIFACT_DIR)await page.screenshot({path:process.env.GP_HELP_ARTIFACT_DIR+'/dynamic-390-after-detection-with-tab.png'});
+  await peer.evaluate(()=>window.syntheticPeer.close());await peer.close();await page.clock.fastForward(31000);await page.getByRole('button',{name:'Druga kartica',exact:true}).waitFor({state:'hidden'});
+  const afterSecondExpiry=await readHeaderPlacement();assert.equal(afterSecondExpiry.actionsSameRow,true);
+  assert.deepEqual(await page.evaluate(()=>window.readHelpState()),{...dynamicBefore,sameNode:true,sameBlob:true});
+  assert.deepEqual(await page.evaluate(()=>({sameHeader:document.querySelector('header.app-header')===window.dynamicHeader,sameHelp:document.querySelector('.help-trigger')===window.dynamicHelp,helpFocused:document.activeElement===window.dynamicHelp,writes:window.helpRemoteWrites})),{sameHeader:true,sameHelp:true,helpFocused:true,writes:0});
+  assert.equal(dynamicNavigations,0);page.off('framenavigated',onDynamicNavigation);
+  if(process.env.GP_HELP_ARTIFACT_DIR){const {writeFile}=await import('node:fs/promises');await writeFile(process.env.GP_HELP_ARTIFACT_DIR+'/header-layouts.json',JSON.stringify(headerLayouts,null,2));await writeFile(process.env.GP_HELP_ARTIFACT_DIR+'/dynamic-layouts.json',JSON.stringify({afterExpiry,afterDetection,afterSecondExpiry},null,2));}
+  assert.equal(requests,0);assert.deepEqual(errors,[]);console.log('HEADER HELP: X/Escape/history Back in five views; unchanged live journal/draft/input/Blob; header focus/top; paired actions, with actual TabPresence through a synthetic BroadcastChannel peer; 40 layouts at 240/280/320/360/390/430/600/601/768/1280 and 100/200% text; no-tab actions share brand row when they fit, present tab keeps actions below; narrow fallback without clipped labels or overlap; live expiry/detection/expiry without reload or remount, stable input/draft/Blob/help focus, clock advances actual production timers; no remote writes or browser network. Physical Android Back remains untested.');
  }finally{await browser.close();}
 });
