@@ -2850,7 +2850,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
 
 
         // Release label is updated with each published release and verified against its commit.
-        const RELEASE_VERSION = '2026.11.03.10';
+        const RELEASE_VERSION = '2026.11.06.1';
         const PRODUCT_CATEGORIES = ['Bela tehnika','Mali kućni aparati','Klima i grejanje','TV, audio i video','Računari i laptopovi','PC komponente i periferija','Mobilni telefoni i tableti','Mrežna i pametna oprema','Alat i radionica','Bašta i dvorište','Auto i moto oprema','Nameštaj i oprema za dom','Ostalo'];
         const normalizeSearch = value => textValue(value).toLocaleLowerCase('sr-Latn').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'dj').replace(/\s+/g,' ').trim();
         const storeKey = value => textValue(value).toLocaleLowerCase('sr-Latn').replace(/\s+/g,' ').trim();
@@ -4107,7 +4107,8 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                     <fieldset disabled={navigationPending || saving || discarding || removing || resolving || stale || !!conflict || savedEditPending || v2Busy} className="space-y-4">
                         {!initial&&<ReceiptQR disabled={saving||processing||discarding||sealed} isCurrent={qrCurrent} onApply={applyQR}/>}
                         {qrNotice&&<p role="status">{qrNotice}</p>}
-                        <section className="form-block"><h2>Podaci o proizvodu</h2><div className="form-grid"><label className="block full">Naziv proizvoda
+                        <p className="small muted">* Obavezna polja.</p>
+                        <section className="form-block"><h2>Podaci o proizvodu</h2><div className="form-grid"><label className="block full">Naziv proizvoda <span aria-hidden="true">*</span>
                             <input type="text" required value={form.name} disabled={sealed} onChange={e => change('name', e.target.value)} className="w-full p-3 border rounded-xl" />
                         </label>
                         <label className="block">Kategorija proizvoda<select value={form.category} disabled={sealed} onChange={e=>change('category',e.target.value)} className="w-full min-w-0 p-3 border rounded-xl"><option value="">Izaberi kategoriju</option>{form.category && !PRODUCT_CATEGORIES.includes(form.category) && <option value={form.category}>{form.category} (stara vrednost)</option>}{PRODUCT_CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></label>
@@ -4116,7 +4117,7 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                         </label>
                         <div className="grid sm:grid-cols-2 gap-4">
                             <label className="block">Plaćena cena proizvoda<input type="text" inputMode="decimal" value={form.purchasePrice??''} disabled={sealed} onChange={e=>change('purchasePrice',e.target.value)} className="catalog-control"/></label>
-                            <label className="block">Valuta<input type="text" maxLength={3} value={form.currency??''} disabled={sealed} onChange={e=>change('currency',e.target.value.toUpperCase())} placeholder="EUR" className="catalog-control"/></label>
+                            <label className="block">Valuta<input type="text" maxLength={3} aria-describedby="currency-help" value={form.currency??''} disabled={sealed} onChange={e=>change('currency',e.target.value.toUpperCase())} placeholder="EUR" className="catalog-control"/><span id="currency-help" className="small muted">Valuta je obavezna samo ako unesete cenu.</span></label>
                         </div>
                         <label className="block">Broj fiskalnog računa<input type="text" maxLength={200} value={form.invoiceNumber??''} disabled={sealed} onChange={e=>change('invoiceNumber',e.target.value)} className="catalog-control"/></label>
                         <label className="block full">Izvorni QR link<input type="url" value={form.fiscalReceiptUrl??''} disabled={sealed} onChange={e=>change('fiscalReceiptUrl',e.target.value)} className="catalog-control"/></label>
@@ -4125,9 +4126,9 @@ window.driveEnvironment={allowWrites:true,allowFolders:false,namespace:'producti
                             <span id="description-count" className="text-sm text-slate-500">{form.description.length}/150 karaktera</span>
                         </label>
                         </div></section><section className="form-block"><h2>Trajanje garancije</h2><div className="form-grid">
-                            <label>Datum kupovine<input type="date" required max={dateInput()} value={form.purchaseDate} disabled={sealed} onChange={e => change('purchaseDate', e.target.value)} className="w-full p-3 border rounded-xl" /></label>
-                            <label>Trajanje (meseci)<input type="number" required min="1" step="1" value={form.baseMonths} disabled={sealed} onChange={e => change('baseMonths', e.target.value)} className="w-full p-3 border rounded-xl" /></label>
-                            <label>Produžena garancija (meseci)<input type="number" required min="0" step="1" value={form.extendedMonths} disabled={sealed} onChange={e => change('extendedMonths', e.target.value)} className="w-full p-3 border rounded-xl" /></label>
+                            <label>Datum kupovine <span aria-hidden="true">*</span><input type="date" required max={dateInput()} value={form.purchaseDate} disabled={sealed} onChange={e => change('purchaseDate', e.target.value)} className="w-full p-3 border rounded-xl" /></label>
+                            <label>Trajanje (meseci) <span aria-hidden="true">*</span><input type="number" required min="1" step="1" value={form.baseMonths} disabled={sealed} onChange={e => change('baseMonths', e.target.value)} className="w-full p-3 border rounded-xl" /></label>
+                            <label>Produžena garancija (meseci) <span aria-hidden="true">*</span><input type="number" required min="0" step="1" aria-describedby="extended-warranty-help" value={form.extendedMonths} disabled={sealed} onChange={e => change('extendedMonths', e.target.value)} className="w-full p-3 border rounded-xl" /><span id="extended-warranty-help" className="small muted">Unesite 0 ako nema produžene garancije.</span></label>
                         </div>
                         <p role="status" className="bg-slate-50 p-3 rounded-xl">Ističe: {fmtDate(expiry)}</p>
                         </section>

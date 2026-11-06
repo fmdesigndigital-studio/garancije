@@ -4,6 +4,66 @@ import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import {webcrypto} from 'node:crypto';
 const html=await readFile(new URL('../index.html',import.meta.url),'utf8');
+function requiredFieldSource(){
+ const formStart=html.indexOf('        function DraftForm('),legend=html.indexOf('<p className="small muted">* Obavezna polja.</p>',formStart);
+ const end=html.indexOf("{(service?.mode === 'simulated-drive'",legend);
+ const validationStart=html.indexOf('                if (!form.name.trim()',formStart),validationEnd=html.indexOf('                if (malformedAttachments)',validationStart);
+ assert.ok(legend>formStart&&end>legend&&validationEnd>validationStart);
+ return {markup:html.slice(legend,end),validation:html.slice(validationStart,validationEnd),helpers:[
+  html.slice(html.indexOf('        const textValue ='),html.indexOf('        const calcDays =')),
+  html.slice(html.indexOf('        const formValues ='),html.indexOf('        const catalogRows =')),
+  html.slice(html.indexOf('        const fiscalLink ='),html.indexOf('        const qrDate ='))
+ ].join('\n')};
+}
+test('Required field markers and help preserve four native requirements and conditional currency validation',()=>{
+ const {markup,validation,helpers}=requiredFieldSource(),labels=[...markup.matchAll(/<label\b[^>]*>([\s\S]*?)<\/label>/g)].map(m=>m[1]);
+ const required=labels.filter(s=>/<input\b[^>]*\brequired\b/.test(s));
+ assert.equal(required.length,4);assert.equal(labels.filter(s=>s.includes('<span aria-hidden="true">*</span>')).length,4);
+ for(const field of ['name','purchaseDate','baseMonths','extendedMonths'])assert.ok(required.some(s=>s.includes('value={form.'+field+'}')&&s.includes('<span aria-hidden="true">*</span>')));
+ assert.match(markup,/aria-describedby="extended-warranty-help"/);assert.match(markup,/id="extended-warranty-help"[^>]*>Unesite 0 ako nema produžene garancije\./);
+ assert.match(markup,/aria-describedby="currency-help"/);assert.match(markup,/id="currency-help"[^>]*>Valuta je obavezna samo ako unesete cenu\./);
+ const context=vm.createContext({URL,URLSearchParams});vm.runInContext(helpers+'\nthis.validate=(patch={})=>{const form={...formValues(null),name:"Synthetic product",purchaseDate:"2025-01-01",...patch},expiry=calcExp(form.purchaseDate,form.baseMonths,form.extendedMonths),metadataBase={current:null};let error="";const setError=value=>error=value;const run=()=>{'+validation+'return formMetadata(form,null);};const data=run();return {error,data};};',context);
+ for(const patch of [{},{purchasePrice:'',currency:''},{purchasePrice:'0',currency:'EUR'},{purchasePrice:'12,34',currency:'EUR'},{extendedMonths:'0'}])assert.equal(context.validate(patch).error,'',JSON.stringify(patch));
+ for(const patch of [{purchasePrice:'0',currency:''},{purchasePrice:'12.34',currency:''},{currency:'EU'},{baseMonths:'0'},{baseMonths:'1.5'},{extendedMonths:'-1'},{extendedMonths:'0.5'},{name:' '},{purchaseDate:'2025-02-30'},{purchaseDate:'9999-01-01'}])assert.notEqual(context.validate(patch).error,'',JSON.stringify(patch));
+ const data=context.validate({purchasePrice:'12,34',currency:'EUR',extendedMonths:'0'}).data;assert.equal(data.purchasePriceMinor,1234);assert.equal(data.currency,'EUR');assert.equal(data.extendedMonths,0);
+});
+
+test('Chromium required field help, native validation and conditional currency in new and existing form values',{skip:process.env.GP_DOM_TEST!=='1'},async()=>{
+ const {createRequire}=await import('node:module'),req=createRequire(import.meta.url),pw=req(process.env.GP_PLAYWRIGHT_PATH),babel=req(process.env.GP_BABEL_PATH);
+ const {markup,validation,helpers}=requiredFieldSource();
+ const libs=await Promise.all([...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m=>m[1]).filter(u=>/react(?:-dom)?@/.test(u)).map(async u=>{const r=await fetch(u);assert.equal(r.status,200);return r.text();}));
+ const browser=await pw.chromium.launch({headless:true,...(process.env.GP_CHROMIUM_PATH?{executablePath:process.env.GP_CHROMIUM_PATH}:{})});
+ try{
+  const page=await browser.newPage({viewport:{width:390,height:844}}),errors=[];let requests=0;page.on('pageerror',e=>errors.push(e.message));
+  await page.route('**/*',r=>r.request().url()==='http://localhost/'?r.fulfill({contentType:'text/html',body:'<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body class="gp-ui"><main class="gp-container"><div id="root"></div></main></body></html>'}):(requests++,r.abort()));
+  await page.goto('http://localhost/');await page.addStyleTag({content:html.match(/<style>([\s\S]*?)<\/style>/)[1]});for(const content of libs)await page.addScriptTag({content});
+  const fixture=`const {useState}=React;${helpers}
+   const PRODUCT_CATEGORIES=[];window.syntheticSubmissions=[];
+   function FieldFixture({initial=null}){const [form,setForm]=useState(()=>formValues(initial)),[error,setError]=useState(''),sealed=false,metadataBase={current:initial};
+    const change=(key,value)=>setForm(old=>({...old,[key]:value})),expiry=calcExp(form.purchaseDate,form.baseMonths,form.extendedMonths);window.syntheticForm=form;
+    const submit=e=>{e.preventDefault();setError('');${validation}window.syntheticSubmissions.push(formMetadata(form,initial));};
+    return <form className="form-shell gp-form" onSubmit={submit}>${markup}<p role="alert">{error}</p><button type="submit">Proveri unos</button></form>;}
+   const root=ReactDOM.createRoot(document.getElementById('root'));window.renderFields=initial=>root.render(<FieldFixture key={initial?'existing':'new'} initial={initial}/>);window.renderFields(null);`;
+  await page.addScriptTag({content:babel.transform(fixture,{presets:[['react',{runtime:'classic'}]]}).code});
+  const form=page.locator('form'),name=page.getByRole('textbox',{name:'Naziv proizvoda',exact:true}),date=page.getByLabel(/Datum kupovine/),base=page.getByRole('spinbutton',{name:'Trajanje (meseci)',exact:true}),extra=page.getByRole('spinbutton',{name:/Produžena garancija/}),price=page.getByRole('textbox',{name:'Plaćena cena proizvoda',exact:true}),currency=page.getByRole('textbox',{name:/^Valuta/});
+  await name.waitFor();assert.equal(await form.locator('input[required]').count(),4);assert.equal(await form.locator('label span[aria-hidden="true"]').count(),4);assert.equal(await page.getByText('* Obavezna polja.',{exact:true}).isVisible(),true);
+  assert.equal(await extra.getAttribute('aria-describedby'),'extended-warranty-help');assert.equal(await currency.getAttribute('aria-describedby'),'currency-help');assert.equal(await currency.getAttribute('required'),null);
+  assert.equal(await extra.inputValue(),'0');assert.equal(await form.evaluate(e=>e.checkValidity()),false);
+  await name.fill('Synthetic product');await date.fill('2025-01-01');assert.equal(await form.evaluate(e=>e.checkValidity()),true);
+  for(const field of [name,date,base,extra]){const value=await field.inputValue();await field.fill('');assert.equal(await field.evaluate(e=>e.validity.valueMissing),true);await field.fill(value);}
+  for(const [field,value,flag]of [[base,'0','rangeUnderflow'],[base,'1.5','stepMismatch'],[extra,'-1','rangeUnderflow'],[extra,'0.5','stepMismatch'],[date,'9999-01-01','rangeOverflow']]){const old=await field.inputValue();await field.fill(value);assert.equal(await field.evaluate((e,f)=>e.validity[f],flag),true);await field.fill(old);}
+  const submit=page.getByRole('button',{name:'Proveri unos',exact:true});await submit.click();assert.equal(await page.evaluate(()=>window.syntheticSubmissions.length),1);assert.equal(await page.evaluate(()=>window.syntheticSubmissions[0].purchasePriceMinor),null);
+  for(const value of ['0','12.34']){await price.fill(value);await submit.click();assert.match(await page.getByRole('alert').innerText(),/Uz cenu izaberite valutu/);assert.equal(await page.evaluate(()=>window.syntheticSubmissions.length),1);}
+  await currency.fill('eur');assert.equal(await currency.inputValue(),'EUR');await submit.click();assert.equal(await page.evaluate(()=>window.syntheticSubmissions.length),2);assert.equal(await page.evaluate(()=>window.syntheticSubmissions[1].purchasePriceMinor),1234);
+  await price.fill('');await currency.fill('');await submit.click();assert.equal(await page.evaluate(()=>window.syntheticSubmissions.length),3);
+  const existing={name:'Synthetic existing',purchaseDate:'2025-02-01',baseMonths:36,extendedMonths:0,purchasePriceMinor:12345,currency:'EUR',category:'Synthetic legacy category',store:'Synthetic shop',description:'Synthetic description',invoiceNumber:'SYNTHETIC-42',fiscalReceiptUrl:''};
+  await page.evaluate(value=>window.renderFields(value),existing);await name.waitFor();await page.waitForFunction(()=>window.syntheticForm.name==='Synthetic existing');
+  assert.equal(await price.inputValue(),'123.45');assert.equal(await extra.inputValue(),'0');await submit.click();const saved=await page.evaluate(()=>window.syntheticSubmissions.at(-1));for(const [key,value]of Object.entries(existing))assert.equal(saved[key],value,key);
+  for(const width of [320,390,1280])for(const scale of [1,2]){await page.setViewportSize({width,height:844});await page.addStyleTag({content:'html{font-size:'+16*scale+'px}body.gp-ui{font-size:'+16*scale+'px}'});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'horizontal overflow '+width+'/'+scale);for(const id of ['currency-help','extended-warranty-help'])assert.equal(await page.locator('#'+id).evaluate(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(e).visibility==='visible';}),true,id+' '+width+'/'+scale);}
+  assert.equal(requests,0);assert.deepEqual(errors,[]);console.log('REQUIRED FIELDS: four native requirements; 0 extension valid; empty/negative/fractional/future inputs rejected; currency only with price including 0; existing values preserved; six 320/390/1280px and 100/200% layouts; isolated synthetic form, no real writes or browser network.');
+ }finally{await browser.close();}
+});
+
 const start=html.indexOf('// ATTACHMENT COUNT METADATA'),script=html.slice(start,html.indexOf('</script>',start));
 const clone=v=>v===undefined?undefined:JSON.parse(JSON.stringify(v));
 const ref=(n,name='Image-'+n+'.jpg')=>({id:'attachment-'+n,name,storage:'google-drive',driveFileId:'synthetic_drive_file_'+n,
